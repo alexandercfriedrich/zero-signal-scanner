@@ -48,6 +48,17 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtest(data: dict, cfg: dict):
+    """Daily backtest.
+
+    IMPORTANT: For variant-1 backtests ("today's constituents"), we must not
+    force an intersection of dates across all symbols. That can collapse the
+    timeline to near-zero because some tickers have missing history.
+
+    We therefore:
+      - use the regime symbol calendar as the master index
+      - for each symbol on each day, skip if data is missing
+    """
+
     symbols = cfg['symbols']
     regime_symbol = cfg['regime_symbol']
 
@@ -58,30 +69,25 @@ def run_backtest(data: dict, cfg: dict):
     if missing:
         raise ValueError(f"Missing symbols in loaded data: {missing}")
 
-    # align dates
-    idx = None
-    for s in needed:
-        idx = data[s].index if idx is None else idx.intersection(data[s].index)
-
+    # master calendar from regime symbol
     start = pd.Timestamp(cfg['start'])
     end = pd.Timestamp(cfg['end'])
+    idx = data[regime_symbol].index
     idx = idx[(idx >= start) & (idx <= end)]
 
-    for s in needed:
-        df = data[s].reindex(idx)
-        df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
-        data[s] = df
+    # reindex regime and inverse symbols to master calendar (keep NaN; we will guard)
+    for s in [regime_symbol] + list(cfg.get('inverse_map', {}).values()):
+        if s in data:
+            data[s] = data[s].reindex(idx)
 
-    # recompute idx after dropna
-    idx = None
-    for s in needed:
-        idx = data[s].index if idx is None else idx.intersection(data[s].index)
-    for s in needed:
-        data[s] = data[s].reindex(idx).dropna(subset=['Open', 'High', 'Low', 'Close'])
-
-    # indicators
+    # indicators (compute per symbol on its own index; then align to master calendar)
     for s in needed:
         df = data[s]
+        # If the symbol isn't on the master calendar yet (universe symbols), align it.
+        if not df.index.equals(idx):
+            df = df.reindex(idx)
+            data[s] = df
+
         df['ATR'] = atr(df, cfg['atr_period'])
         df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
         df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
@@ -101,8 +107,10 @@ def run_backtest(data: dict, cfg: dict):
     def mark_to_market(date):
         eq = cash
         for p in open_positions:
-            px = float(data[p['symbol']].loc[date, 'Close'])
-            eq += p['shares'] * px
+            px = data[p['symbol']].loc[date, 'Close']
+            if pd.isna(px):
+                continue
+            eq += p['shares'] * float(px)
         return float(eq)
 
     for i, date in enumerate(idx):
@@ -110,9 +118,14 @@ def run_backtest(data: dict, cfg: dict):
         new_open = []
         for p in open_positions:
             df = data[p['symbol']]
-            h = float(df.loc[date, 'High'])
-            l = float(df.loc[date, 'Low'])
-            c = float(df.loc[date, 'Close'])
+            h = df.loc[date, 'High']
+            l = df.loc[date, 'Low']
+            c = df.loc[date, 'Close']
+            if pd.isna(h) or pd.isna(l) or pd.isna(c):
+                new_open.append(p)
+                continue
+
+            h = float(h); l = float(l); c = float(c)
 
             exit_px = None
             reason = None
@@ -166,10 +179,13 @@ def run_backtest(data: dict, cfg: dict):
         if risk_on:
             for sym in symbols:
                 row = data[sym].loc[date]
-                if pd.isna(row['HH']) or pd.isna(row['ATR']) or float(row['Close']) < cfg['min_price']:
+                # if any key field missing, skip that symbol on that date
+                if pd.isna(row.get('HH')) or pd.isna(row.get('ATR')) or pd.isna(row.get('Close')):
                     continue
-                dv = row['DollarVol']
-                if not pd.isna(dv) and float(dv) < cfg['min_dollar_volume']:
+                if float(row['Close']) < cfg['min_price']:
+                    continue
+                dv = row.get('DollarVol')
+                if (dv is not None) and (not pd.isna(dv)) and float(dv) < cfg['min_dollar_volume']:
                     continue
                 if float(row['Close']) > float(row['HH']):
                     score = (float(row['Close']) - float(row['HH'])) / float(row['ATR'])
@@ -178,9 +194,10 @@ def run_backtest(data: dict, cfg: dict):
             inv = cfg.get('inverse_map', {}).get(regime_symbol)
             if inv and inv in data:
                 row = reg.loc[date]
-                if (not pd.isna(row['LL'])) and (not pd.isna(row['ATR'])) and (float(row['Close']) < float(row['LL'])):
-                    score = (float(row['LL']) - float(row['Close'])) / float(row['ATR'])
-                    candidates.append((inv, score))
+                if (not pd.isna(row.get('LL'))) and (not pd.isna(row.get('ATR'))) and (not pd.isna(row.get('Close'))):
+                    if float(row['Close']) < float(row['LL']):
+                        score = (float(row['LL']) - float(row['Close'])) / float(row['ATR'])
+                        candidates.append((inv, score))
 
         if not candidates:
             continue
@@ -190,12 +207,18 @@ def run_backtest(data: dict, cfg: dict):
         picks = candidates[:n_new]
 
         for sym, _ in picks:
-            entry_px = float(data[sym].loc[next_date, 'Open'])
+            o = data[sym].loc[next_date, 'Open']
+            if pd.isna(o):
+                continue
+            entry_px = float(o)
             if not np.isfinite(entry_px) or entry_px <= 0:
                 continue
 
             entry_px_eff = entry_px * (1 + spread)
-            atr_v = float(data[sym].loc[date, 'ATR'])
+            atr_raw = data[sym].loc[date, 'ATR']
+            if pd.isna(atr_raw):
+                continue
+            atr_v = float(atr_raw)
             if not np.isfinite(atr_v) or atr_v <= 0:
                 continue
 
