@@ -166,7 +166,6 @@ def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
     avg_win = float(wins['pnl'].mean()) if not wins.empty else 0.0
     avg_loss = float(losses['pnl'].mean()) if not losses.empty else 0.0
 
-    # True R-multiples when available
     exp_r = np.nan
     if 'R_multiple' in trades_df.columns:
         exp_r = float(trades_df['R_multiple'].mean())
@@ -208,7 +207,7 @@ def breakdown_tables(trades_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return out
 
 
-def run_backtest(data: dict, cfg: dict):
+def run_backtest(data: dict, cfg: dict, progress_cb=None):
     symbols = cfg['symbols']
     regime_symbol = cfg['regime_symbol']
 
@@ -228,6 +227,7 @@ def run_backtest(data: dict, cfg: dict):
         if s in data:
             data[s] = data[s].reindex(idx)
 
+    # indicators
     for s in needed:
         df = data[s]
         if not df.index.equals(idx):
@@ -303,7 +303,12 @@ def run_backtest(data: dict, cfg: dict):
 
         return (2.0 * mom_v) + (1.0 * brk) + (0.3 * vol_ok) - (2.0 * vol_pen)
 
+    n = len(idx)
+
     for i, date in enumerate(idx):
+        if progress_cb is not None and (i % 5 == 0 or i == n - 1):
+            progress_cb(i + 1, n, date)
+
         new_open = []
         for p in open_positions:
             df = data[p['symbol']]
@@ -417,7 +422,7 @@ def run_backtest(data: dict, cfg: dict):
                 )
             open_positions = new_open
 
-        if i >= len(idx) - 1:
+        if i >= n - 1:
             continue
         next_date = idx[i + 1]
 
