@@ -289,7 +289,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
 
     bl_source = cfg.get('breakout_level_source', 'close')
-    trailing_ref = cfg.get('trailing_reference', 'high')
+    trailing_ref = cfg.get('trailing_reference', 'close')
     confirm = int(cfg.get('breakout_confirm_closes', 1))
     rsi_period_cfg = int(cfg.get('rsi_period', 0))
     rsi_max_cfg = float(cfg.get('rsi_max', 100))
