@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-from backtest_engine import run_backtest
+from backtest_engine import run_backtest, rsi
 
 st.set_page_config(page_title='3S- Stock Signal Scanner by AF', layout='wide')
 
@@ -34,10 +34,18 @@ DEFAULT_CFG = {
   "atr_stop_mult": 2.0,
   "use_trailing_stop": True,
   "atr_trail_mult": 2.5,
+  "trailing_reference": "close",
 
   "breakout_lookback": 55,
+  "breakout_level_source": "close",
+  "breakout_confirm_closes": 1,
   "sma_regime": 200,
   "max_holding_days": 30,
+
+  "min_breakout_vol_mult": 0.0,
+  "rsi_period": 0,
+  "rsi_max": 100,
+  "max_breakout_extension_atr": 1e9,
 
   "mom_lookback": 126,
 
@@ -51,6 +59,10 @@ DEFAULT_CFG = {
   "cwh_trend_sma": 50,
   "cwh_vol_bonus": 0.3,
 
+  "corr_lookback_days": 60,
+  "max_pair_corr": 1.0,
+  "max_positions_per_sector": 999,
+
   "spread_bps_per_side": 8,
   "min_price": 2.0,
   "min_dollar_volume": 2_000_000,
@@ -61,6 +73,8 @@ DEFAULT_CFG = {
 PRESETS = {
     'Swing (Top-5, Risk-On only)': None,  # uses DEFAULT_CFG
     'Best (2011-2026)': 'config_best_2011_2026.json',
+    'Best (2011-2026) – mehr Signale': 'config_best_2011_2026_mehr_signale.json',
+    'Best (2011-2026) – höhere Trefferquote': 'config_best_2011_2026_hoehere_trefferquote.json',
 }
 
 
@@ -137,6 +151,23 @@ with st.sidebar:
         st.session_state['preset_name'] = preset
 
     cfg_text = st.text_area('config.json (ohne symbols)', value=st.session_state['cfg_text'], height=420)
+
+    with st.expander('ℹ️ Neue Konfigurations-Parameter'):
+        st.markdown("""
+| Parameter | Standard | Beschreibung |
+|---|---|---|
+| `trailing_reference` | `"high"` | Trailing-Stop-Basis: `"high"` = Chandelier (Höchstkurs), `"close"` = Schlusskurs |
+| `breakout_level_source` | `"close"` | Ausbruchsniveau: `"close"` = Schlusskurshoch, `"high"` = Tageshoch |
+| `breakout_confirm_closes` | `1` | Anzahl aufeinanderfolgender Closes über Breakout-Level (1 = sofort, 2 = bestätigt) |
+| `min_breakout_vol_mult` | `0.0` | Mindest-Volumen: Volume ≥ N × VolSMA50 am Breakout-Tag (0 = deaktiviert) |
+| `rsi_period` | `0` | RSI-Periode für Overbought-Filter (0 = deaktiviert) |
+| `rsi_max` | `100` | Max. RSI beim Einstieg (z.B. 70 = kein Einstieg bei überkauft) |
+| `max_breakout_extension_atr` | `1e9` | Max. Ausdehnung in ATR-Einheiten über dem Level (1e9 = deaktiviert) |
+| `corr_lookback_days` | `60` | Lookback-Tage für Korrelationsfilter zwischen Positionen |
+| `max_pair_corr` | `1.0` | Max. Korrelation zu offenen Positionen (1.0 = deaktiviert) |
+| `max_positions_per_sector` | `999` | Max. Positionen pro Sektor (999 = deaktiviert, benötigt S&P 500 Universe) |
+""")
+
     run_btn = st.button('Start', type='primary')
 
 
@@ -238,6 +269,34 @@ def load_atx_symbols() -> list[str]:
     except Exception:
         pass
     return []
+
+
+@st.cache_data(ttl=6*60*60, show_spinner=False)
+def load_sp500_sector_map() -> dict:
+    """Load S&P 500 sector mapping from Wikipedia.
+
+    Searches for the first column containing 'symbol' or 'ticker' and the first
+    column containing 'sector' or 'gics' (e.g. 'GICS Sector'). Returns a dict
+    mapping ticker → sector string, or an empty dict on failure.
+    """
+    wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+    try:
+        r = requests.get(wiki_url, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        df = tables[0]
+        cols_lower = {str(c).lower(): c for c in df.columns}
+        sym_col = next((cols_lower[k] for k in cols_lower if 'symbol' in k or 'ticker' in k), None)
+        sec_col = next((cols_lower[k] for k in cols_lower if 'sector' in k or 'gics' in k), None)
+        if sym_col and sec_col:
+            result = {}
+            for _, row in df.iterrows():
+                sym = str(row[sym_col]).upper().replace('.', '-')
+                result[sym] = str(row[sec_col])
+            return result
+    except Exception:
+        pass
+    return {}
 
 
 def yahoo_search(query: str, region: str, lang: str):
@@ -412,6 +471,13 @@ if run_btn:
 
     cfg = dict(cfg)
     cfg['symbols'] = [s for s in symbols if s not in [cfg['regime_symbol']] and s not in cfg.get('inverse_map', {}).values()]
+
+    # Load sector map if available (used for sector-cap filter)
+    sector_map = {}
+    if universe_mode == 'S&P 500 (Wikipedia)':
+        sector_map = load_sp500_sector_map()
+    cfg['sector_map'] = sector_map
+
     needed_daily = sorted(list(set(cfg['symbols'] + [cfg['regime_symbol']] + list(cfg.get('inverse_map', {}).values()))))
 
     ui_prog = st.progress(0.0)
@@ -536,52 +602,113 @@ if run_btn:
         reg = daily[cfg['regime_symbol']].copy(); reg['Date']=pd.to_datetime(reg['Date']); reg=reg.sort_values('Date').set_index('Date')
         risk_on = bool(reg['Close'].iloc[-1] > reg['Close'].rolling(cfg['sma_regime']).mean().iloc[-1])
 
+        bl_src = cfg.get('breakout_level_source', 'close')
+        scan_confirm = int(cfg.get('breakout_confirm_closes', 1))
+        scan_min_bvm = float(cfg.get('min_breakout_vol_mult', 0.0))
+        scan_rsi_p = int(cfg.get('rsi_period', 0))
+        scan_rsi_max = float(cfg.get('rsi_max', 100))
+        scan_max_ext = float(cfg.get('max_breakout_extension_atr', 1e9))
+
         rows = []
         for sym in cfg['symbols']:
             if sym not in daily:
                 continue
             df = daily[sym].copy(); df['Date']=pd.to_datetime(df['Date']); df=df.sort_values('Date').set_index('Date')
-            hh = df['High'].shift(1).rolling(cfg['breakout_lookback']).max().iloc[-1]
+
+            if bl_src == 'high':
+                bl_series = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
+            else:
+                bl_series = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
+
             high, low, close = df['High'], df['Low'], df['Close']
             tr = pd.concat([(high-low), (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
             atr_v = tr.rolling(cfg['atr_period']).mean().iloc[-1]
-            if pd.isna(hh) or pd.isna(atr_v) or float(atr_v) <= 0:
+            bl = bl_series.iloc[-1]
+            if pd.isna(bl) or pd.isna(atr_v) or float(atr_v) <= 0:
                 continue
+
             px = float(df['Close'].iloc[-1])
-            if risk_on and px > float(hh):
-                risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
-                stop_price = float(px - risk_per_share)
-                tp_price = float(px + float(cfg.get('take_profit_R', 2.0)) * risk_per_share)
-                shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
-                rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'asof': str(df.index[-1].date()), 'atr': float(atr_v), 'risk_per_share': risk_per_share, 'stop_price': stop_price, 'tp_price': tp_price, 'shares_for_1000eur': shares_for_1000eur})
+            if not risk_on or px <= float(bl):
+                continue
+
+            # Consecutive-close confirmation
+            if scan_confirm >= 2:
+                if len(df) < scan_confirm:
+                    continue
+                confirmed = all(
+                    (not pd.isna(bl_series.iloc[-(k+1)])) and
+                    float(df['Close'].iloc[-(k+1)]) > float(bl_series.iloc[-(k+1)])
+                    for k in range(scan_confirm)
+                )
+                if not confirmed:
+                    continue
+
+            breakout_strength = (px - float(bl)) / float(atr_v)
+
+            # Extension cap
+            if scan_max_ext < 1e9 and breakout_strength > scan_max_ext:
+                continue
+
+            # RSI filter
+            if scan_rsi_p > 0 and scan_rsi_max < 100:
+                rsi_v = float(rsi(df['Close'], scan_rsi_p).iloc[-1])
+                if pd.isna(rsi_v) or rsi_v > scan_rsi_max:
+                    continue
+
+            # Volume data
+            vol_sma50 = df['Volume'].rolling(50).mean().iloc[-1]
+            vol_today = df['Volume'].iloc[-1]
+
+            # Volume confirmation filter
+            if scan_min_bvm > 0:
+                if pd.isna(vol_sma50) or float(vol_sma50) <= 0 or pd.isna(vol_today) or float(vol_today) < scan_min_bvm * float(vol_sma50):
+                    continue
+
+            vol_ratio = float(vol_today) / float(vol_sma50) if (not pd.isna(vol_sma50) and float(vol_sma50) > 0 and not pd.isna(vol_today)) else 1.0
+
+            risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
+            stop_price = float(px - risk_per_share)
+            tp_price = float(px + float(cfg.get('take_profit_R', 2.0)) * risk_per_share)
+            shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
+            rows.append({
+                'symbol': sym, 'side': 'LONG', 'price': px,
+                'breakout_level': float(bl), 'asof': str(df.index[-1].date()),
+                'atr': float(atr_v), 'risk_per_share': risk_per_share,
+                'stop_price': stop_price, 'tp_price': tp_price,
+                'shares_for_1000eur': shares_for_1000eur,
+                'vol_ratio': round(vol_ratio, 2),
+                'breakout_strength': round(breakout_strength, 2),
+            })
 
         ui_status.caption('Daily scan: done')
         st.subheader(f'Daily Signale (RiskOn={risk_on})')
         df_sig = pd.DataFrame(rows)
         if not df_sig.empty:
-            df_sig['breakout_strength'] = (df_sig['price'] - df_sig['breakout_level']) / df_sig['atr']
-            df_sig['Sicherheit'] = (10.0 / (1.0 + df_sig['breakout_strength'])).round(1)
-            df_sig = df_sig.drop(columns=['breakout_strength']).sort_values('Sicherheit', ascending=False)
+            df_sig['Entry-Nähe ★'] = (10.0 / (1.0 + df_sig['breakout_strength'])).round(1)
+            df_sig['Follow-Through ★'] = (df_sig['breakout_strength'] * 2.0 * df_sig['vol_ratio'].pow(0.5)).clip(upper=10.0).round(1)
+            df_sig = df_sig.drop(columns=['breakout_strength']).sort_values('Follow-Through ★', ascending=False)
 
-            def _color_sicherheit(val):
-                ratio = float(val) / 10.0
+            def _color_score(val):
+                ratio = min(1.0, float(val) / 10.0)
                 r = int(255 * (1.0 - ratio))
                 g = int(200 * ratio)
                 return f'background-color: rgba({r},{g},80,0.35)'
 
-            styled = df_sig.style.map(_color_sicherheit, subset=['Sicherheit'])
+            styled = df_sig.style.map(_color_score, subset=['Entry-Nähe ★', 'Follow-Through ★'])
             col_cfg = {
                 'symbol': st.column_config.TextColumn('Symbol', help='Aktien-Ticker-Symbol'),
                 'side': st.column_config.TextColumn('Richtung', help='Handelsrichtung (LONG/SHORT)'),
                 'price': st.column_config.NumberColumn('Kurs', help='Letzter Schlusskurs', format='%.2f'),
-                'breakout_level': st.column_config.NumberColumn('Ausbruchsniveau', help='55-Tage-Hoch (Breakout-Level)', format='%.2f'),
+                'breakout_level': st.column_config.NumberColumn('Ausbruchsniveau', help='Breakout-Level (Close- oder High-Basis je nach `breakout_level_source`)', format='%.2f'),
                 'asof': st.column_config.TextColumn('Datum', help='Datum des letzten Handelstags'),
                 'atr': st.column_config.NumberColumn('ATR', help='Average True Range (14 Tage) – Maß für Volatilität', format='%.2f'),
                 'risk_per_share': st.column_config.NumberColumn('Risiko/Aktie', help='Risiko je Aktie = ATR × Stop-Multiplikator', format='%.2f'),
                 'stop_price': st.column_config.NumberColumn('Stop-Loss', help='Stop-Loss-Kurs = Kurs − Risiko/Aktie', format='%.2f'),
                 'tp_price': st.column_config.NumberColumn('Take-Profit', help='Take-Profit = Kurs + 2 × Risiko/Aktie', format='%.2f'),
                 'shares_for_1000eur': st.column_config.NumberColumn('Stück/1000€', help='Stückzahl bei 1.000 € Konto und 1 % Risiko pro Trade'),
-                'Sicherheit': st.column_config.NumberColumn('Sicherheit ★', help='Sicherheitsscore 0–10: Höher = näher am Ausbruchsniveau (weniger überschossen)', format='%.1f'),
+                'vol_ratio': st.column_config.NumberColumn('Vol-Ratio', help='Heutiges Volumen / 50-Tage-Ø-Volumen. >1 = überdurchschnittliches Volumen', format='%.2f'),
+                'Entry-Nähe ★': st.column_config.NumberColumn('Entry-Nähe ★', help='Nähe zum Ausbruchsniveau (0–10). Höher = weniger überschossen, sichererer Einstieg. 10 = direkt am Level.', format='%.1f'),
+                'Follow-Through ★': st.column_config.NumberColumn('Follow-Through ★', help='Ausbruchsstärke inkl. Volumen (0–10). Höher = stärkerer Ausbruch mit gutem Volumen. Sortierung nach diesem Wert.', format='%.1f'),
             }
             st.dataframe(styled, column_config=col_cfg, use_container_width=True)
             st.download_button(
