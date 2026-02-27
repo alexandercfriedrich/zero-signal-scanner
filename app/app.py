@@ -21,15 +21,35 @@ DEFAULT_CFG = {
   "regime_symbol": "SPY",
   "inverse_map": {"SPY": "SH"},
   "hard_risk_on": True,
+
   "max_new_trades_per_day": 2,
   "max_positions": 5,
+  "weekly_rerank": True,
+  "weekly_rebalance_weekday": 0,
+
   "risk_per_trade": 0.01,
+
   "atr_period": 14,
-  "atr_stop_mult": 1.5,
+  "atr_stop_mult": 2.0,
+  "use_trailing_stop": True,
+  "atr_trail_mult": 2.5,
+
   "breakout_lookback": 55,
   "sma_regime": 200,
-  "take_profit_R": 2.0,
-  "max_holding_days": 20,
+  "max_holding_days": 30,
+
+  "mom_lookback": 126,
+
+  "enable_cwh": True,
+  "cwh_cup_min_bars": 30,
+  "cwh_cup_max_bars": 130,
+  "cwh_handle_min_bars": 5,
+  "cwh_handle_max_bars": 20,
+  "cwh_max_cup_depth": 0.35,
+  "cwh_max_handle_depth": 0.15,
+  "cwh_trend_sma": 50,
+  "cwh_vol_bonus": 0.3,
+
   "spread_bps_per_side": 8,
   "min_price": 2.0,
   "min_dollar_volume": 2_000_000,
@@ -57,12 +77,9 @@ with st.sidebar:
 
     st.header('Konfiguration')
     preset = st.selectbox('Preset', ['Swing (Top-5, Risk-On only)'], index=0)
-    if preset == 'Swing (Top-5, Risk-On only)':
-        cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
-    else:
-        cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
+    cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
 
-    cfg_text = st.text_area('config.json (ohne symbols)', value=cfg_default_text, height=360)
+    cfg_text = st.text_area('config.json (ohne symbols)', value=cfg_default_text, height=420)
     run_btn = st.button('Start', type='primary')
 
 
@@ -309,10 +326,9 @@ def intraday_scan(daily_data: dict[str, pd.DataFrame], intraday_data: dict[str, 
         if risk_on and px > float(hh):
             score = (px - float(hh)) / float(atr_v)
 
-            # suggested sizing (simple): risk per share = ATR*mult, stop = px - risk_per_share
             risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
             stop_price = float(px - risk_per_share)
-            tp_price = float(px + float(cfg['take_profit_R']) * risk_per_share)
+            tp_price = float(px + float(cfg.get('take_profit_R', 2.0)) * risk_per_share)
             shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
 
             rows.append({
@@ -365,6 +381,13 @@ if run_btn:
         m4.metric('Volatility', f"{summary['Volatility']*100:.2f}%")
         m5.metric('Trades', str(summary['Trades']))
 
+        m6, m7, m8, m9, m10 = st.columns(5)
+        m6.metric('Profit Factor', '-' if pd.isna(summary.get('ProfitFactor')) else f"{summary.get('ProfitFactor'):.2f}")
+        m7.metric('Win Rate', '-' if pd.isna(summary.get('WinRate')) else f"{summary.get('WinRate')*100:.1f}%")
+        m8.metric('Avg Win', '-' if pd.isna(summary.get('AvgWin')) else f"{summary.get('AvgWin'):.2f}")
+        m9.metric('Avg Loss', '-' if pd.isna(summary.get('AvgLoss')) else f"{summary.get('AvgLoss'):.2f}")
+        m10.metric('Expectancy (R approx)', '-' if pd.isna(summary.get('Expectancy_R')) else f"{summary.get('Expectancy_R'):.2f}")
+
         c1, c2 = st.columns([1.4, 1])
         with c1:
             st.plotly_chart(px.line(equity_df.reset_index(), x='Date', y='Equity', title='Equity Curve'), use_container_width=True)
@@ -398,7 +421,7 @@ if run_btn:
             if risk_on and px > float(hh):
                 risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
                 stop_price = float(px - risk_per_share)
-                tp_price = float(px + float(cfg['take_profit_R']) * risk_per_share)
+                tp_price = float(px + float(cfg.get('take_profit_R', 2.0)) * risk_per_share)
                 shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
                 rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'asof': str(df.index[-1].date()), 'atr': float(atr_v), 'risk_per_share': risk_per_share, 'stop_price': stop_price, 'tp_price': tp_price, 'shares_for_1000eur': shares_for_1000eur})
 
