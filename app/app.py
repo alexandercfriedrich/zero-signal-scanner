@@ -69,7 +69,6 @@ def load_sp500_symbols() -> list[str]:
       2) GitHub raw CSV fallback (datasets repo)
     """
 
-    # 1) Wikipedia (preferred)
     wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
     try:
         r = requests.get(
@@ -85,8 +84,6 @@ def load_sp500_symbols() -> list[str]:
     except Exception:
         pass
 
-    # 2) Fallback: raw CSV from GitHub datasets (more stable than HTML scraping)
-    # Source: https://github.com/datasets/s-and-p-500-companies
     raw_csv = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv'
     r = requests.get(raw_csv, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
     r.raise_for_status()
@@ -245,7 +242,7 @@ def load_intraday(symbols: list[str], interval: str, period: str) -> dict[str, p
         if p.exists():
             try:
                 d = pd.read_parquet(p)
-                col = 'Datetime' if 'Datetime' in d.columns else ('Date' if 'Date' in columns else None)
+                col = 'Datetime' if 'Datetime' in d.columns else ('Date' if 'Date' in d.columns else None)
                 if col:
                     d[col] = pd.to_datetime(d[col])
                     if d[col].max().date() >= (pd.Timestamp.today().date() - pd.Timedelta(days=1)):
@@ -294,8 +291,8 @@ def intraday_scan(daily_data: dict[str, pd.DataFrame], intraday_data: dict[str, 
         hh = df['High'].shift(1).rolling(lookback).max().iloc[-1]
         high, low, close = df['High'], df['Low'], df['Close']
         tr = pd.concat([(high-low), (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
-        atr = tr.rolling(cfg['atr_period']).mean().iloc[-1]
-        if pd.isna(hh) or pd.isna(atr) or float(atr) <= 0:
+        atr_v = tr.rolling(cfg['atr_period']).mean().iloc[-1]
+        if pd.isna(hh) or pd.isna(atr_v) or float(atr_v) <= 0:
             continue
 
         idf = intraday_data[sym].copy(); idf['Datetime']=pd.to_datetime(idf['Datetime']); idf=idf.sort_values('Datetime')
@@ -303,8 +300,27 @@ def intraday_scan(daily_data: dict[str, pd.DataFrame], intraday_data: dict[str, 
         px = float(last['Close'])
 
         if risk_on and px > float(hh):
-            score = (px - float(hh)) / float(atr)
-            rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'score':float(score), 'asof': str(last['Datetime'])})
+            score = (px - float(hh)) / float(atr_v)
+
+            # suggested sizing (simple): risk per share = ATR*mult, stop = px - risk_per_share
+            risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
+            stop_price = float(px - risk_per_share)
+            tp_price = float(px + float(cfg['take_profit_R']) * risk_per_share)
+            shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
+
+            rows.append({
+                'symbol': sym,
+                'side': 'LONG',
+                'price': px,
+                'breakout_level': float(hh),
+                'score': float(score),
+                'asof': str(last['Datetime']),
+                'atr': float(atr_v),
+                'risk_per_share': float(risk_per_share),
+                'stop_price': float(stop_price),
+                'tp_price': float(tp_price),
+                'shares_for_1000eur': shares_for_1000eur,
+            })
 
     return pd.DataFrame(rows).sort_values('score', ascending=False), risk_on
 
@@ -366,14 +382,21 @@ if run_btn:
                 continue
             df = daily[sym].copy(); df['Date']=pd.to_datetime(df['Date']); df=df.sort_values('Date').set_index('Date')
             hh = df['High'].shift(1).rolling(cfg['breakout_lookback']).max().iloc[-1]
-            if pd.isna(hh):
+            high, low, close = df['High'], df['Low'], df['Close']
+            tr = pd.concat([(high-low), (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
+            atr_v = tr.rolling(cfg['atr_period']).mean().iloc[-1]
+            if pd.isna(hh) or pd.isna(atr_v) or float(atr_v) <= 0:
                 continue
             px = float(df['Close'].iloc[-1])
             if risk_on and px > float(hh):
-                rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'asof': str(df.index[-1].date())})
+                risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
+                stop_price = float(px - risk_per_share)
+                tp_price = float(px + float(cfg['take_profit_R']) * risk_per_share)
+                shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
+                rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'asof': str(df.index[-1].date()), 'atr': float(atr_v), 'risk_per_share': risk_per_share, 'stop_price': stop_price, 'tp_price': tp_price, 'shares_for_1000eur': shares_for_1000eur})
 
         st.subheader(f'Daily Signale (RiskOn={risk_on})')
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows).sort_values('atr', ascending=False), use_container_width=True)
 
     else:
         with st.spinner(f'Daily Daten laden ({len(needed_daily)})...'):
