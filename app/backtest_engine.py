@@ -502,10 +502,14 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                         if not confirmed:
                             setup = None
                     # Extension cap
-                    if setup is not None and max_ext < 1e8:
-                        extension = (float(row['Close']) - float(piv)) / float(row['ATR'])
-                        if extension > max_ext:
+                    if setup is not None and max_ext < 1e9:
+                        atr_val = row.get('ATR')
+                        if pd.isna(atr_val) or float(atr_val) <= 0:
                             setup = None
+                        else:
+                            extension = (float(row['Close']) - float(piv)) / float(atr_val)
+                            if extension > max_ext:
+                                setup = None
                     # RSI filter
                     if setup is not None and rsi_period_cfg > 0 and rsi_max_cfg < 100:
                         rsi_val = row.get('RSI')
