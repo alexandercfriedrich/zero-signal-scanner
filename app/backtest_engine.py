@@ -47,19 +47,175 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def pct_return(close: pd.Series, n: int) -> pd.Series:
+    return close / close.shift(n) - 1
+
+
+def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Heuristic Cup-with-Handle detector (daily bars).
+
+    This aims to be systematic and testable rather than "perfect".
+
+    Outputs (per date):
+      - CWH_Pivot: handle high (pivot) level
+      - CWH_Signal: boolean (close breaks above pivot)
+      - CWH_HandleLow: handle low (for stop placement)
+      - CWH_VolOK: volume confirmation proxy
+
+    Best-practice inspired constraints (configurable):
+      - Uptrend context (price above SMA)
+      - Cup depth not too deep
+      - Handle depth small and near the highs
+      - Volume dries up during handle (proxy)
+    """
+
+    df = df.copy()
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    vol = df['Volume']
+
+    cup_min = int(cfg.get('cwh_cup_min_bars', 30))
+    cup_max = int(cfg.get('cwh_cup_max_bars', 130))
+    handle_min = int(cfg.get('cwh_handle_min_bars', 5))
+    handle_max = int(cfg.get('cwh_handle_max_bars', 20))
+    max_cup_depth = float(cfg.get('cwh_max_cup_depth', 0.35))
+    max_handle_depth = float(cfg.get('cwh_max_handle_depth', 0.15))
+
+    trend_sma_n = int(cfg.get('cwh_trend_sma', 50))
+    df['CWH_TrendOK'] = close > sma(close, trend_sma_n)
+
+    # rolling volume averages (handles missing volume gracefully)
+    df['VolSMA20'] = sma(vol, 20)
+
+    pivots = np.full(len(df), np.nan)
+    handle_lows = np.full(len(df), np.nan)
+    vol_ok = np.full(len(df), False)
+
+    # We evaluate candidate windows ending at t (current bar).
+    # Handle is the most recent consolidation before breakout.
+    for t in range(len(df)):
+        if t < cup_min + handle_min + 5:
+            continue
+
+        if not bool(df['CWH_TrendOK'].iloc[t]):
+            continue
+
+        best = None
+
+        # Search for a handle window (h_start..h_end=t-1), then a cup window before it.
+        h_end = t - 1
+        for h_len in range(handle_min, handle_max + 1):
+            h_start = h_end - h_len + 1
+            if h_start <= 0:
+                continue
+
+            handle_high = float(high.iloc[h_start:h_end + 1].max())
+            handle_low = float(low.iloc[h_start:h_end + 1].min())
+            if not np.isfinite(handle_high) or not np.isfinite(handle_low) or handle_high <= 0:
+                continue
+
+            handle_depth = (handle_high - handle_low) / handle_high
+            if handle_depth > max_handle_depth:
+                continue
+
+            # Cup window ends right before handle starts
+            cup_end = h_start - 1
+            for cup_len in (cup_min, cup_max):
+                pass
+            for cup_len in range(cup_min, cup_max + 1, 5):
+                cup_start = cup_end - cup_len + 1
+                if cup_start <= 0:
+                    continue
+
+                cup_high = float(high.iloc[cup_start:cup_end + 1].max())
+                cup_low = float(low.iloc[cup_start:cup_end + 1].min())
+                if not np.isfinite(cup_high) or not np.isfinite(cup_low) or cup_high <= 0:
+                    continue
+
+                cup_depth = (cup_high - cup_low) / cup_high
+                if cup_depth <= 0 or cup_depth > max_cup_depth:
+                    continue
+
+                # Handle should be near the highs (not deep in the base)
+                if handle_high < (0.8 * cup_high):
+                    continue
+
+                # Volume dry-up proxy: handle vol SMA20 lower than cup vol SMA20
+                cup_vol = df['VolSMA20'].iloc[cup_start:cup_end + 1].median() if 'VolSMA20' in df.columns else np.nan
+                handle_vol = df['VolSMA20'].iloc[h_start:h_end + 1].median() if 'VolSMA20' in df.columns else np.nan
+                v_ok = False
+                if np.isfinite(cup_vol) and np.isfinite(handle_vol) and cup_vol > 0:
+                    v_ok = bool(handle_vol < cup_vol)
+
+                # Prefer higher pivots and tighter handles
+                quality = 0.0
+                quality += (1.0 - handle_depth) * 2.0
+                quality += (1.0 - cup_depth)
+                quality += 0.5 if v_ok else 0.0
+
+                if (best is None) or (quality > best[0]):
+                    best = (quality, handle_high, handle_low, v_ok)
+
+        if best is None:
+            continue
+
+        _, p, hl, v_ok = best
+        pivots[t] = p
+        handle_lows[t] = hl
+        vol_ok[t] = v_ok
+
+    df['CWH_Pivot'] = pivots
+    df['CWH_HandleLow'] = handle_lows
+    df['CWH_VolOK'] = vol_ok
+    df['CWH_Signal'] = (df['Close'] > df['CWH_Pivot']) & np.isfinite(df['CWH_Pivot'])
+
+    return df
+
+
+def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
+    if trades_df is None or trades_df.empty:
+        return {
+            'ProfitFactor': np.nan,
+            'WinRate': np.nan,
+            'AvgWin': np.nan,
+            'AvgLoss': np.nan,
+            'Expectancy_R': np.nan,
+        }
+
+    wins = trades_df[trades_df['pnl'] > 0]
+    losses = trades_df[trades_df['pnl'] < 0]
+
+    gross_win = float(wins['pnl'].sum()) if not wins.empty else 0.0
+    gross_loss = float((-losses['pnl']).sum()) if not losses.empty else 0.0
+    pf = (gross_win / gross_loss) if gross_loss > 0 else np.inf
+
+    win_rate = float(len(wins) / len(trades_df))
+    avg_win = float(wins['pnl'].mean()) if not wins.empty else 0.0
+    avg_loss = float(losses['pnl'].mean()) if not losses.empty else 0.0
+
+    # R-multiples: pnl / (entry_px - stop) / shares  (stored as pnl and shares; stop not stored in trade row)
+    # As we don't store stop in trade rows yet, approximate Expectancy_R via pnl / (abs(avg_loss)) when losses exist.
+    exp_r = np.nan
+    if gross_loss > 0 and avg_loss < 0:
+        exp_r = float((win_rate * (avg_win / abs(avg_loss))) - ((1 - win_rate) * 1.0))
+
+    return {
+        'ProfitFactor': float(pf),
+        'WinRate': float(win_rate),
+        'AvgWin': float(avg_win),
+        'AvgLoss': float(avg_loss),
+        'Expectancy_R': float(exp_r) if np.isfinite(exp_r) else np.nan,
+    }
+
+
 def run_backtest(data: dict, cfg: dict):
     """Daily backtest.
 
-    IMPORTANT: For variant-1 backtests ("today's constituents"), we must not
-    force an intersection of dates across all symbols. That can collapse the
-    timeline to near-zero because some tickers have missing history.
-
-    We therefore:
-      - use the regime symbol calendar as the master index
-      - for each symbol on each day, skip if data is missing
-
     Swing preset support:
       - hard risk-on gate (if configured): no new entries when market is risk-off
+      - daily fill up to max_positions + weekly rerank selection (if configured)
+      - optional cup-with-handle detector + momentum scoring
     """
 
     symbols = cfg['symbols']
@@ -83,19 +239,36 @@ def run_backtest(data: dict, cfg: dict):
         if s in data:
             data[s] = data[s].reindex(idx)
 
-    # indicators (compute per symbol on its own index; then align to master calendar)
+    # indicators
     for s in needed:
         df = data[s]
-        # If the symbol isn't on the master calendar yet (universe symbols), align it.
         if not df.index.equals(idx):
             df = df.reindex(idx)
             data[s] = df
 
         df['ATR'] = atr(df, cfg['atr_period'])
         df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
+
+        # 55d breakout by close confirmation (pivot = rolling max of prior closes)
+        df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
+
+        # still compute HH/LL for legacy / intraday scan use
         df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
         df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
+
         df['DollarVol'] = dollar_volume(df)
+
+        # momentum features
+        mom_n = int(cfg.get('mom_lookback', 126))
+        df['Mom'] = pct_return(df['Close'], mom_n)
+
+        # volume confirmation proxy
+        df['VolSMA50'] = sma(df['Volume'], 50)
+        df['VolSMA20'] = sma(df['Volume'], 20)
+
+        # cup-with-handle detector
+        if bool(cfg.get('enable_cwh', True)):
+            data[s] = detect_cup_handle(df, cfg)
 
     reg = data[regime_symbol]
     reg['RiskOn'] = reg['Close'] > reg['SMA_regime']
@@ -107,8 +280,12 @@ def run_backtest(data: dict, cfg: dict):
     open_positions = []
     trades = []
 
-    # swing preset: hard gate
     hard_risk_on = bool(cfg.get('hard_risk_on', False))
+    weekly_rerank = bool(cfg.get('weekly_rerank', True))
+
+    # trailing stop config
+    use_trailing = bool(cfg.get('use_trailing_stop', True))
+    trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
 
     def mark_to_market(date):
         eq = cash
@@ -118,6 +295,38 @@ def run_backtest(data: dict, cfg: dict):
                 continue
             eq += p['shares'] * float(px)
         return float(eq)
+
+    def is_weekly_rebalance_day(date: pd.Timestamp) -> bool:
+        # Monday = 0
+        wd = int(date.weekday())
+        return wd == int(cfg.get('weekly_rebalance_weekday', 0))
+
+    def score_candidate(sym: str, date: pd.Timestamp) -> float:
+        row = data[sym].loc[date]
+        if pd.isna(row.get('ATR')) or float(row['ATR']) <= 0:
+            return -np.inf
+
+        # momentum (6m) + breakout strength + volume confirmation, penalize high volatility
+        mom = row.get('Mom')
+        mom_v = float(mom) if (mom is not None and not pd.isna(mom)) else 0.0
+
+        # volatility penalty: ATR / Close
+        vol_pen = 0.0
+        if not pd.isna(row.get('Close')) and float(row['Close']) > 0:
+            vol_pen = float(row['ATR']) / float(row['Close'])
+
+        vol_ok = 0.0
+        if (not pd.isna(row.get('VolSMA20'))) and (not pd.isna(row.get('VolSMA50'))):
+            if float(row['VolSMA20']) > float(row['VolSMA50']):
+                vol_ok = 1.0
+
+        # breakout strength uses close vs pivot close
+        pivot = row.get('PivotClose')
+        brk = 0.0
+        if pivot is not None and not pd.isna(pivot):
+            brk = (float(row['Close']) - float(pivot)) / float(row['ATR'])
+
+        return (2.0 * mom_v) + (1.0 * brk) + (0.3 * vol_ok) - (2.0 * vol_pen)
 
     for i, date in enumerate(idx):
         # exits first
@@ -135,13 +344,19 @@ def run_backtest(data: dict, cfg: dict):
             l = float(l)
             c = float(c)
 
+            # trailing stop update
+            if use_trailing:
+                atr_raw = df.loc[date, 'ATR']
+                if not pd.isna(atr_raw) and float(atr_raw) > 0:
+                    new_stop = c - trail_mult * float(atr_raw)
+                    p['stop'] = float(max(p['stop'], new_stop))
+
             exit_px = None
             reason = None
-            # conservative intraday path
             if l <= p['stop']:
                 exit_px = p['stop']
                 reason = 'STOP'
-            elif h >= p['tp']:
+            elif (p.get('tp') is not None) and (not pd.isna(p.get('tp'))) and (h >= p['tp']):
                 exit_px = p['tp']
                 reason = 'TP'
 
@@ -166,6 +381,7 @@ def run_backtest(data: dict, cfg: dict):
                     'shares': p['shares'],
                     'pnl': (exit_px_eff - p['entry_px']) * p['shares'],
                     'reason': reason,
+                    'setup': p.get('setup', 'BREAKOUT'),
                 }
             )
 
@@ -174,12 +390,48 @@ def run_backtest(data: dict, cfg: dict):
         eq_today = mark_to_market(date)
         equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash, 'OpenPositions': len(open_positions)})
 
+        # weekly rerank: drop weakest positions (optional)
+        risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False
+        if weekly_rerank and risk_on and is_weekly_rebalance_day(date) and open_positions:
+            scored = []
+            for p in open_positions:
+                sc = score_candidate(p['symbol'], date)
+                scored.append((p, sc))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            keep = scored[: int(cfg['max_positions'])]
+            keep_syms = set([p['symbol'] for p, _ in keep])
+            # close dropped at close
+            new_open = []
+            for p in open_positions:
+                if p['symbol'] in keep_syms:
+                    new_open.append(p)
+                    continue
+                c = data[p['symbol']].loc[date, 'Close']
+                if pd.isna(c):
+                    new_open.append(p)
+                    continue
+                exit_px_eff = float(c) * (1 - spread)
+                cash += p['shares'] * exit_px_eff
+                trades.append(
+                    {
+                        'symbol': p['symbol'],
+                        'side': p['side'],
+                        'entry_date': p['entry_date'].date().isoformat(),
+                        'entry_px': p['entry_px'],
+                        'exit_date': date.date().isoformat(),
+                        'exit_px': exit_px_eff,
+                        'shares': p['shares'],
+                        'pnl': (exit_px_eff - p['entry_px']) * p['shares'],
+                        'reason': 'RERANK',
+                        'setup': p.get('setup', 'BREAKOUT'),
+                    }
+                )
+            open_positions = new_open
+
         # entries require next open
         if i >= len(idx) - 1:
             continue
         next_date = idx[i + 1]
-
-        risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False
 
         # hard gate: no entries when risk off
         if hard_risk_on and (not risk_on):
@@ -192,26 +444,34 @@ def run_backtest(data: dict, cfg: dict):
         if risk_on:
             for sym in symbols:
                 row = data[sym].loc[date]
-                # if any key field missing, skip that symbol on that date
-                if pd.isna(row.get('HH')) or pd.isna(row.get('ATR')) or pd.isna(row.get('Close')):
+                if pd.isna(row.get('ATR')) or pd.isna(row.get('Close')):
                     continue
                 if float(row['Close']) < cfg['min_price']:
                     continue
                 dv = row.get('DollarVol')
                 if (dv is not None) and (not pd.isna(dv)) and float(dv) < cfg['min_dollar_volume']:
                     continue
-                if float(row['Close']) > float(row['HH']):
-                    score = (float(row['Close']) - float(row['HH'])) / float(row['ATR'])
-                    candidates.append((sym, score))
-        else:
-            # legacy risk-off hedge behavior (disabled when hard_risk_on is True)
-            inv = cfg.get('inverse_map', {}).get(regime_symbol)
-            if inv and inv in data:
-                row = reg.loc[date]
-                if (not pd.isna(row.get('LL'))) and (not pd.isna(row.get('ATR'))) and (not pd.isna(row.get('Close'))):
-                    if float(row['Close']) < float(row['LL']):
-                        score = (float(row['LL']) - float(row['Close'])) / float(row['ATR'])
-                        candidates.append((inv, score))
+
+                setup = None
+
+                # 55d close breakout
+                piv = row.get('PivotClose')
+                if piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
+                    setup = 'BREAKOUT'
+
+                # cup-with-handle breakout
+                if bool(cfg.get('enable_cwh', True)) and bool(row.get('CWH_Signal', False)):
+                    setup = 'CUP_HANDLE'
+
+                if setup is None:
+                    continue
+
+                sc = score_candidate(sym, date)
+                # slight bonus if CWH has vol confirmation
+                if setup == 'CUP_HANDLE' and bool(row.get('CWH_VolOK', False)):
+                    sc += float(cfg.get('cwh_vol_bonus', 0.3))
+
+                candidates.append((sym, sc, setup))
 
         if not candidates:
             continue
@@ -220,7 +480,7 @@ def run_backtest(data: dict, cfg: dict):
         n_new = min(cfg['max_new_trades_per_day'], cfg['max_positions'] - len(open_positions))
         picks = candidates[:n_new]
 
-        for sym, _ in picks:
+        for sym, _, setup in picks:
             o = data[sym].loc[next_date, 'Open']
             if pd.isna(o):
                 continue
@@ -237,8 +497,16 @@ def run_backtest(data: dict, cfg: dict):
                 continue
 
             stop_dist = cfg['atr_stop_mult'] * atr_v
+
             stop = entry_px_eff - stop_dist
-            tp = entry_px_eff + cfg['take_profit_R'] * stop_dist
+            if setup == 'CUP_HANDLE':
+                hl = data[sym].loc[date].get('CWH_HandleLow')
+                if hl is not None and not pd.isna(hl) and float(hl) > 0:
+                    stop = min(stop, float(hl))
+
+            tp = None
+            if not use_trailing:
+                tp = entry_px_eff + cfg['take_profit_R'] * stop_dist
 
             risk_eur = cfg['risk_per_trade'] * eq_today
             denom = max(1e-9, entry_px_eff - stop)
@@ -261,8 +529,9 @@ def run_backtest(data: dict, cfg: dict):
                     'entry_date': next_date,
                     'entry_px': entry_px_eff,
                     'shares': shares,
-                    'stop': stop,
+                    'stop': float(stop),
                     'tp': tp,
+                    'setup': setup,
                 }
             )
 
@@ -277,6 +546,8 @@ def run_backtest(data: dict, cfg: dict):
     dd = (eq / eq.cummax() - 1)
     max_dd = dd.min()
 
+    stats = compute_trade_stats(trades_df)
+
     summary = {
         'start': str(eq.index.min().date()),
         'end': str(eq.index.max().date()),
@@ -287,6 +558,7 @@ def run_backtest(data: dict, cfg: dict):
         'Sharpe_approx': float(sharpe),
         'MaxDrawdown': float(max_dd),
         'Trades': int(len(trades_df)),
+        **stats,
     }
 
     return equity_df, trades_df, summary
