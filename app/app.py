@@ -271,7 +271,12 @@ def load_atx_symbols() -> list[str]:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def load_sp500_sector_map() -> dict:
-    """Load S&P 500 sector mapping from Wikipedia (GICS Sector column)."""
+    """Load S&P 500 sector mapping from Wikipedia.
+
+    Searches for the first column containing 'symbol' or 'ticker' and the first
+    column containing 'sector' or 'gics' (e.g. 'GICS Sector'). Returns a dict
+    mapping ticker → sector string, or an empty dict on failure.
+    """
     wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
     try:
         r = requests.get(wiki_url, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
