@@ -34,7 +34,7 @@ DEFAULT_CFG = {
   "atr_stop_mult": 2.0,
   "use_trailing_stop": True,
   "atr_trail_mult": 2.5,
-  "trailing_reference": "close",
+  "trailing_reference": "high",
 
   "breakout_lookback": 55,
   "breakout_level_source": "close",
@@ -78,14 +78,34 @@ PRESETS = {
 }
 
 
+def _merge_cfg(base: dict, override: dict) -> dict:
+    """Shallow-merge override into base, but merge inverse_map dicts."""
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if k == 'inverse_map' and isinstance(v, dict):
+            out[k] = dict(out.get(k, {}) or {})
+            out[k].update(v)
+        else:
+            out[k] = v
+    return out
+
+
 def load_preset_cfg(preset_name: str) -> dict:
-    """Load preset config dict. Returns DEFAULT_CFG for the default preset."""
+    """Load preset config dict, always including DEFAULT_CFG keys.
+
+    This ensures new optional parameters are visible/editable in the config textarea
+    even when older preset JSON files don't contain those keys.
+    """
     p = PRESETS.get(preset_name)
     if not p:
         return dict(DEFAULT_CFG)
+
     preset_path = (Path(__file__).parent / p)
     try:
-        return json.loads(preset_path.read_text())
+        raw = json.loads(preset_path.read_text())
+        if not isinstance(raw, dict):
+            return dict(DEFAULT_CFG)
+        return _merge_cfg(DEFAULT_CFG, raw)
     except Exception:
         # Fall back to default if file is missing or invalid
         return dict(DEFAULT_CFG)
