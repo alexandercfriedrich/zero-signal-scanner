@@ -80,10 +80,9 @@ def load_preset_cfg(preset_name: str) -> dict:
 st.title('3S- Stock Signal Scanner by AF')
 st.markdown("""
 **Was macht dieser Scanner?**  
-Der 3S Stock Signal Scanner durchsucht täglich Aktien aus dem S&P 500 und europäischen Märkten nach technischen Ausbruchssignalen.
+Der 3S Stock Signal Scanner durchsucht täglich Aktien aus verschiedenen Indizes nach technischen Ausbruchssignalen auf Tagesbasis.
 
-**Gesuchte Signale:**
-- 📈 **Intraday-Breakout**: Aktueller Intraday-Kurs überschreitet das 55-Tage-Tageshoch
+**Gesuchtes Signal:**
 - 📊 **Daily Close-Breakout**: Tagesschlusskurs überschreitet das 55-Tage-Hoch
 
 **Einstieg & Ausstieg (Backtest-Logik):**
@@ -98,15 +97,26 @@ Der 3S Stock Signal Scanner durchsucht täglich Aktien aus dem S&P 500 und europ
 
 with st.sidebar:
     st.header('Universe')
-    universe_mode = st.radio('Quelle', ['S&P 500 (Wikipedia)', 'Custom (ISIN/WKN/Name/Yahoo Ticker)'], index=0)
+    universe_mode = st.radio(
+        'Quelle',
+        ['S&P 500 (Wikipedia)', 'Nasdaq 100 (Wikipedia)', 'DAX 40 (Wikipedia)', 'ATX (Wikipedia)', 'Custom'],
+        index=0,
+    )
     custom_list = ''
-    if universe_mode.startswith('Custom'):
-        custom_list = st.text_area('Liste (eine Zeile pro Eintrag)', value='AAPL\nMSFT\nVIG.VI\nDB1.DE\nAT0000937503')
+    if universe_mode == 'Custom':
+        custom_list = st.text_area(
+            'Ticker-Liste',
+            value='AAPL\nMSFT\nVIG.VI\nDB1.DE',
+            help=(
+                'Nur Yahoo-Finance-Ticker-Symbole werden akzeptiert (ein Symbol pro Zeile). '
+                'Alternativ können auch Firmenname, ISIN oder WKN eingegeben werden; '
+                'der Resolver versucht diese automatisch in Yahoo-Ticker umzuwandeln '
+                '(kann durch Rate-Limiting zeitweise langsam sein).'
+            ),
+        )
 
     st.header('Aktion')
-    action = st.radio('Modus', ['Intraday Signalscan', 'Daily Signalscan', 'Backtest (Daily, 5y)'], index=0)
-    intraday_interval = st.selectbox('Intraday-Intervall', ['5m','15m','30m','60m'], index=1)
-    intraday_period = st.selectbox('Intraday-Periode', ['7d','30d','60d'], index=2)
+    action = st.radio('Modus', ['Daily Signalscan', 'Backtest (Daily, 5y)'], index=0)
 
     st.header('Resolver Präferenzen')
     prefer_regions = st.multiselect('Yahoo region Reihenfolge', ['DE','AT','US','GB'], default=['DE','AT','US'])
@@ -155,6 +165,79 @@ def load_sp500_symbols() -> list[str]:
     df = pd.read_csv(pd.io.common.StringIO(r.text))
     syms = df['Symbol'].astype(str).str.upper().tolist()
     return [s.replace('.', '-') for s in syms]
+
+
+@st.cache_data(ttl=6*60*60, show_spinner=False)
+def load_nasdaq100_symbols() -> list[str]:
+    """Load Nasdaq 100 tickers from Wikipedia."""
+    wiki_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+    try:
+        r = requests.get(wiki_url, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        for df in tables:
+            cols = [str(c).lower() for c in df.columns]
+            if any('ticker' in c or 'symbol' in c for c in cols):
+                col = next(c for c in df.columns if 'ticker' in str(c).lower() or 'symbol' in str(c).lower())
+                syms = df[col].astype(str).str.upper().tolist()
+                return [s.replace('.', '-') for s in syms if s not in ('NAN', '')]
+    except Exception:
+        pass
+    return []
+
+
+def _add_exchange_suffix(syms: list[str], suffix: str) -> list[str]:
+    """Append exchange suffix (e.g. '.DE', '.VI') to plain ticker symbols without an existing exchange suffix.
+    Symbols already containing a dot, or longer than 6 characters, are left unchanged.
+    """
+    result = []
+    for s in syms:
+        # Max 6 chars is typical for European exchange tickers without suffix
+        if '.' not in s and len(s) <= 6:
+            result.append(s + suffix)
+        else:
+            result.append(s)
+    return result
+
+
+@st.cache_data(ttl=6*60*60, show_spinner=False)
+def load_dax40_symbols() -> list[str]:
+    """Load DAX 40 tickers from Wikipedia, appending .DE suffix for yfinance."""
+    wiki_url = 'https://en.wikipedia.org/wiki/DAX'
+    try:
+        r = requests.get(wiki_url, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        for df in tables:
+            cols = [str(c).lower() for c in df.columns]
+            if any('ticker' in c or 'symbol' in c for c in cols):
+                col = next(c for c in df.columns if 'ticker' in str(c).lower() or 'symbol' in str(c).lower())
+                syms = df[col].astype(str).str.upper().tolist()
+                syms = [s for s in syms if s not in ('NAN', '')]
+                return _add_exchange_suffix(syms, '.DE')
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=6*60*60, show_spinner=False)
+def load_atx_symbols() -> list[str]:
+    """Load ATX tickers from Wikipedia, appending .VI suffix for yfinance."""
+    wiki_url = 'https://en.wikipedia.org/wiki/Austrian_Traded_Index'
+    try:
+        r = requests.get(wiki_url, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        for df in tables:
+            cols = [str(c).lower() for c in df.columns]
+            if any('ticker' in c or 'symbol' in c for c in cols):
+                col = next(c for c in df.columns if 'ticker' in str(c).lower() or 'symbol' in str(c).lower())
+                syms = df[col].astype(str).str.upper().tolist()
+                syms = [s for s in syms if s not in ('NAN', '')]
+                return _add_exchange_suffix(syms, '.VI')
+    except Exception:
+        pass
+    return []
 
 
 def yahoo_search(query: str, region: str, lang: str):
@@ -304,109 +387,21 @@ def load_daily(symbols: list[str], start: str, end: str, progress_cb=None) -> di
     return out
 
 
-def load_intraday(symbols: list[str], interval: str, period: str, progress_cb=None) -> dict[str, pd.DataFrame]:
-    out = {}
-    kind = f'{interval}_{period}'
-    need = []
-    for s in symbols:
-        p = cache_path(s, kind)
-        if p.exists():
-            try:
-                d = pd.read_parquet(p)
-                col = 'Datetime' if 'Datetime' in d.columns else ('Date' if 'Date' in d.columns else None)
-                if col:
-                    d[col] = pd.to_datetime(d[col])
-                    if d[col].max().date() >= (pd.Timestamp.today().date() - pd.Timedelta(days=1)):
-                        out[s] = d.rename(columns={col:'Datetime'})
-                        continue
-            except Exception:
-                pass
-        need.append(s)
-
-    if need:
-        chunk = 60
-        total = int(np.ceil(len(need) / chunk))
-        for k, i in enumerate(range(0, len(need), chunk)):
-            batch = need[i:i+chunk]
-            if progress_cb is not None:
-                progress_cb(k, total, f'Intraday: {i}/{len(need)}')
-            got = unpack_download(fetch_yf(batch, interval=interval, period=period), batch)
-            for sym, sub in got.items():
-                if 'Datetime' not in sub.columns:
-                    if 'Date' in sub.columns:
-                        sub = sub.rename(columns={'Date':'Datetime'})
-                    else:
-                        sub = sub.rename(columns={'index':'Datetime'})
-                out[sym] = sub
-                sub.to_parquet(cache_path(sym, kind), index=False)
-        if progress_cb is not None:
-            progress_cb(total, total, 'Intraday: done')
-
-    return out
-
-
-def intraday_scan(daily_data: dict[str, pd.DataFrame], intraday_data: dict[str, pd.DataFrame], cfg: dict):
-    lookback = cfg['breakout_lookback']
-    rows = []
-
-    reg = daily_data[cfg['regime_symbol']].copy()
-    reg['Date'] = pd.to_datetime(reg['Date'])
-    reg = reg.sort_values('Date').set_index('Date')
-    risk_on = bool(reg['Close'].iloc[-1] > reg['Close'].rolling(cfg['sma_regime']).mean().iloc[-1])
-
-    for sym, ddf in daily_data.items():
-        if sym == cfg['regime_symbol']:
-            continue
-        if sym in cfg.get('inverse_map', {}).values():
-            continue
-        if sym not in intraday_data:
-            continue
-
-        df = ddf.copy(); df['Date']=pd.to_datetime(df['Date']); df=df.sort_values('Date').set_index('Date')
-        if len(df) < lookback + 5:
-            continue
-        hh = df['High'].shift(1).rolling(lookback).max().iloc[-1]
-        high, low, close = df['High'], df['Low'], df['Close']
-        tr = pd.concat([(high-low), (high-close.shift(1)).abs(), (low-close.shift(1)).abs()], axis=1).max(axis=1)
-        atr_v = tr.rolling(cfg['atr_period']).mean().iloc[-1]
-        if pd.isna(hh) or pd.isna(atr_v) or float(atr_v) <= 0:
-            continue
-
-        idf = intraday_data[sym].copy(); idf['Datetime']=pd.to_datetime(idf['Datetime']); idf=idf.sort_values('Datetime')
-        last = idf.iloc[-1]
-        px = float(last['Close'])
-
-        if risk_on and px > float(hh):
-            score = (px - float(hh)) / float(atr_v)
-
-            risk_per_share = float(cfg['atr_stop_mult'] * float(atr_v))
-            stop_price = float(px - risk_per_share)
-            tp_price = float(px + float(cfg.get('take_profit_R', 2.0)) * risk_per_share)
-            shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
-
-            rows.append({
-                'symbol': sym,
-                'side': 'LONG',
-                'price': px,
-                'breakout_level': float(hh),
-                'score': float(score),
-                'asof': str(last['Datetime']),
-                'atr': float(atr_v),
-                'risk_per_share': float(risk_per_share),
-                'stop_price': float(stop_price),
-                'tp_price': float(tp_price),
-                'shares_for_1000eur': shares_for_1000eur,
-            })
-
-    return pd.DataFrame(rows).sort_values('score', ascending=False), risk_on
-
-
 if run_btn:
     cfg = json.loads(cfg_text)
 
     with st.spinner('Universe laden & ggf. auflösen...'):
-        if universe_mode.startswith('S&P 500'):
+        if universe_mode == 'S&P 500 (Wikipedia)':
             symbols = load_sp500_symbols()
+            resolve_table = pd.DataFrame({'input': symbols, 'resolved_symbol': symbols})
+        elif universe_mode == 'Nasdaq 100 (Wikipedia)':
+            symbols = load_nasdaq100_symbols()
+            resolve_table = pd.DataFrame({'input': symbols, 'resolved_symbol': symbols})
+        elif universe_mode == 'DAX 40 (Wikipedia)':
+            symbols = load_dax40_symbols()
+            resolve_table = pd.DataFrame({'input': symbols, 'resolved_symbol': symbols})
+        elif universe_mode == 'ATX (Wikipedia)':
+            symbols = load_atx_symbols()
             resolve_table = pd.DataFrame({'input': symbols, 'resolved_symbol': symbols})
         else:
             lines = [x for x in custom_list.splitlines()]
@@ -448,10 +443,10 @@ if run_btn:
         bt_status.caption('Backtest: done')
 
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric('Final Equity', f"{summary['final_equity']:.2f}")
+        m1.metric('Endkapital', f"{summary['final_equity']:.2f}")
         m2.metric('CAGR', f"{summary['CAGR']*100:.2f}%")
-        m3.metric('Max Drawdown', f"{summary['MaxDrawdown']*100:.2f}%")
-        m4.metric('Volatility', f"{summary['Volatility']*100:.2f}%")
+        m3.metric('Max. Drawdown', f"{summary['MaxDrawdown']*100:.2f}%")
+        m4.metric('Volatilität', f"{summary['Volatility']*100:.2f}%")
         m5.metric('Trades', str(summary['Trades']))
 
         m6, m7, m8, m9, m10 = st.columns(5)
@@ -460,6 +455,22 @@ if run_btn:
         m8.metric('Avg Win', '-' if pd.isna(summary.get('AvgWin')) else f"{summary.get('AvgWin'):.2f}")
         m9.metric('Avg Loss', '-' if pd.isna(summary.get('AvgLoss')) else f"{summary.get('AvgLoss'):.2f}")
         m10.metric('Expectancy (R)', '-' if pd.isna(summary.get('Expectancy_R')) else f"{summary.get('Expectancy_R'):.2f}")
+
+        with st.expander('ℹ️ Kennzahlen-Erklärung'):
+            st.markdown("""
+| Kennzahl | Erklärung |
+|---|---|
+| **Endkapital** | Gesamtkapital am Ende des Backtest-Zeitraums |
+| **CAGR** | Jährliche Wachstumsrate (Compound Annual Growth Rate) |
+| **Max. Drawdown** | Größter prozentualer Rückgang vom Höchststand bis zum Tiefpunkt |
+| **Volatilität** | Annualisierte Standardabweichung der täglichen Renditen |
+| **Trades** | Gesamtanzahl abgeschlossener Trades |
+| **Profit Factor** | Verhältnis Gesamtgewinn / Gesamtverlust (>1 = profitabel) |
+| **Win Rate** | Anteil gewinnbringender Trades an allen Trades |
+| **Avg Win** | Durchschnittlicher Gewinn je gewinnbringendem Trade (in €) |
+| **Avg Loss** | Durchschnittlicher Verlust je verlustbringendem Trade (in €) |
+| **Expectancy (R)** | Erwartungswert je Trade in Vielfachen des Risikos (R); >0 = positiv |
+""")
 
         c1, c2 = st.columns([1.4, 1])
         with c1:
@@ -485,15 +496,38 @@ if run_btn:
 
         st.subheader('Breakdown')
         b1, b2 = st.columns(2)
+        breakdown_col_cfg = {
+            'setup': st.column_config.TextColumn('Setup', help='Signal-Typ (z.B. BREAKOUT, CWH)'),
+            'reason': st.column_config.TextColumn('Grund', help='Exit-Grund (z.B. STOP, TRAIL, TIME, RERANK)'),
+            'Trades': st.column_config.NumberColumn('Trades', help='Anzahl abgeschlossener Trades'),
+            'WinRate': st.column_config.NumberColumn('Win Rate', help='Anteil gewinnbringender Trades', format='%.1f%%'),
+            'ProfitFactor': st.column_config.NumberColumn('Profit Factor', help='Gesamtgewinn / Gesamtverlust', format='%.2f'),
+            'AvgPnL': st.column_config.NumberColumn('Ø PnL', help='Durchschnittlicher Gewinn/Verlust je Trade (€)', format='%.2f'),
+            'AvgR': st.column_config.NumberColumn('Ø R', help='Durchschnittliches R-Vielfaches je Trade', format='%.2f'),
+        }
         with b1:
-            st.caption('By setup')
-            st.dataframe(breakdown.get('by_setup', pd.DataFrame()), use_container_width=True)
+            st.caption('Nach Setup')
+            st.dataframe(breakdown.get('by_setup', pd.DataFrame()), column_config=breakdown_col_cfg, use_container_width=True)
         with b2:
-            st.caption('By reason')
-            st.dataframe(breakdown.get('by_reason', pd.DataFrame()), use_container_width=True)
+            st.caption('Nach Exit-Grund')
+            st.dataframe(breakdown.get('by_reason', pd.DataFrame()), column_config=breakdown_col_cfg, use_container_width=True)
 
+        trades_col_cfg = {
+            'symbol': st.column_config.TextColumn('Symbol', help='Aktien-Ticker-Symbol'),
+            'side': st.column_config.TextColumn('Richtung', help='Handelsrichtung (LONG/SHORT)'),
+            'entry_date': st.column_config.TextColumn('Einstiegsdatum', help='Datum des Einstiegs'),
+            'entry_px': st.column_config.NumberColumn('Einstiegskurs', help='Kurs beim Einstieg', format='%.2f'),
+            'exit_date': st.column_config.TextColumn('Ausstiegsdatum', help='Datum des Ausstiegs'),
+            'exit_px': st.column_config.NumberColumn('Ausstiegskurs', help='Kurs beim Ausstieg', format='%.2f'),
+            'shares': st.column_config.NumberColumn('Stück', help='Anzahl gehandelter Aktien'),
+            'pnl': st.column_config.NumberColumn('PnL (€)', help='Gewinn oder Verlust in Euro', format='%.2f'),
+            'reason': st.column_config.TextColumn('Exitgrund', help='Grund für den Ausstieg (STOP, TRAIL, TIME, RERANK)'),
+            'setup': st.column_config.TextColumn('Setup', help='Signal-Typ (z.B. BREAKOUT, CWH)'),
+            'initial_risk_per_share': st.column_config.NumberColumn('Init. Risiko/Aktie', help='Initialer Risikobetrag je Aktie beim Einstieg (€)', format='%.2f'),
+            'R_multiple': st.column_config.NumberColumn('R-Vielfaches', help='Gewinn/Verlust in Vielfachen des initialen Risikos (R)', format='%.2f'),
+        }
         st.subheader('Trades')
-        st.dataframe(trades_df, use_container_width=True)
+        st.dataframe(trades_df, column_config=trades_col_cfg, use_container_width=True)
 
     elif action == 'Daily Signalscan':
         ui_status.caption('Daily Daten laden...')
@@ -558,15 +592,3 @@ if run_btn:
             )
         else:
             st.info('Keine Daily-Signale gefunden.')
-
-    else:
-        ui_status.caption('Daily Daten laden...')
-        daily = load_daily(needed_daily, cfg['start'], cfg['end'], progress_cb=lambda d,t,m: prog_step(d, t, m))
-        ui_status.caption('Intraday Daten laden...')
-        intra = load_intraday([s for s in needed_daily if s in daily], interval=intraday_interval, period=intraday_period, progress_cb=lambda d,t,m: prog_step(d, t, m))
-
-        ui_status.caption('Intraday scan...')
-        sig, risk_on = intraday_scan(daily, intra, cfg)
-        ui_status.caption('Intraday scan: done')
-        st.subheader(f'Intraday Breakout‑Signale (RiskOn={risk_on})')
-        st.dataframe(sig.head(50), use_container_width=True)
