@@ -52,23 +52,6 @@ def pct_return(close: pd.Series, n: int) -> pd.Series:
 
 
 def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """Heuristic Cup-with-Handle detector (daily bars).
-
-    This aims to be systematic and testable rather than "perfect".
-
-    Outputs (per date):
-      - CWH_Pivot: handle high (pivot) level
-      - CWH_Signal: boolean (close breaks above pivot)
-      - CWH_HandleLow: handle low (for stop placement)
-      - CWH_VolOK: volume confirmation proxy
-
-    Best-practice inspired constraints (configurable):
-      - Uptrend context (price above SMA)
-      - Cup depth not too deep
-      - Handle depth small and near the highs
-      - Volume dries up during handle (proxy)
-    """
-
     df = df.copy()
     close = df['Close']
     high = df['High']
@@ -85,15 +68,12 @@ def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     trend_sma_n = int(cfg.get('cwh_trend_sma', 50))
     df['CWH_TrendOK'] = close > sma(close, trend_sma_n)
 
-    # rolling volume averages (handles missing volume gracefully)
     df['VolSMA20'] = sma(vol, 20)
 
     pivots = np.full(len(df), np.nan)
     handle_lows = np.full(len(df), np.nan)
     vol_ok = np.full(len(df), False)
 
-    # We evaluate candidate windows ending at t (current bar).
-    # Handle is the most recent consolidation before breakout.
     for t in range(len(df)):
         if t < cup_min + handle_min + 5:
             continue
@@ -102,8 +82,6 @@ def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             continue
 
         best = None
-
-        # Search for a handle window (h_start..h_end=t-1), then a cup window before it.
         h_end = t - 1
         for h_len in range(handle_min, handle_max + 1):
             h_start = h_end - h_len + 1
@@ -119,10 +97,7 @@ def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             if handle_depth > max_handle_depth:
                 continue
 
-            # Cup window ends right before handle starts
             cup_end = h_start - 1
-            for cup_len in (cup_min, cup_max):
-                pass
             for cup_len in range(cup_min, cup_max + 1, 5):
                 cup_start = cup_end - cup_len + 1
                 if cup_start <= 0:
@@ -137,18 +112,15 @@ def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
                 if cup_depth <= 0 or cup_depth > max_cup_depth:
                     continue
 
-                # Handle should be near the highs (not deep in the base)
                 if handle_high < (0.8 * cup_high):
                     continue
 
-                # Volume dry-up proxy: handle vol SMA20 lower than cup vol SMA20
                 cup_vol = df['VolSMA20'].iloc[cup_start:cup_end + 1].median() if 'VolSMA20' in df.columns else np.nan
                 handle_vol = df['VolSMA20'].iloc[h_start:h_end + 1].median() if 'VolSMA20' in df.columns else np.nan
                 v_ok = False
                 if np.isfinite(cup_vol) and np.isfinite(handle_vol) and cup_vol > 0:
                     v_ok = bool(handle_vol < cup_vol)
 
-                # Prefer higher pivots and tighter handles
                 quality = 0.0
                 quality += (1.0 - handle_depth) * 2.0
                 quality += (1.0 - cup_depth)
@@ -194,11 +166,10 @@ def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
     avg_win = float(wins['pnl'].mean()) if not wins.empty else 0.0
     avg_loss = float(losses['pnl'].mean()) if not losses.empty else 0.0
 
-    # R-multiples: pnl / (entry_px - stop) / shares  (stored as pnl and shares; stop not stored in trade row)
-    # As we don't store stop in trade rows yet, approximate Expectancy_R via pnl / (abs(avg_loss)) when losses exist.
+    # True R-multiples when available
     exp_r = np.nan
-    if gross_loss > 0 and avg_loss < 0:
-        exp_r = float((win_rate * (avg_win / abs(avg_loss))) - ((1 - win_rate) * 1.0))
+    if 'R_multiple' in trades_df.columns:
+        exp_r = float(trades_df['R_multiple'].mean())
 
     return {
         'ProfitFactor': float(pf),
@@ -209,15 +180,35 @@ def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
     }
 
 
+def breakdown_tables(trades_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    out = {}
+    if trades_df is None or trades_df.empty:
+        out['by_setup'] = pd.DataFrame()
+        out['by_reason'] = pd.DataFrame()
+        return out
+
+    def agg(g: pd.DataFrame) -> pd.Series:
+        wins = g[g['pnl'] > 0]
+        losses = g[g['pnl'] < 0]
+        gross_win = float(wins['pnl'].sum()) if not wins.empty else 0.0
+        gross_loss = float((-losses['pnl']).sum()) if not losses.empty else 0.0
+        pf = (gross_win / gross_loss) if gross_loss > 0 else np.inf
+        win_rate = float(len(wins) / len(g)) if len(g) else np.nan
+        avg_r = float(g['R_multiple'].mean()) if 'R_multiple' in g.columns and not g['R_multiple'].isna().all() else np.nan
+        return pd.Series({
+            'Trades': int(len(g)),
+            'WinRate': win_rate,
+            'ProfitFactor': pf,
+            'AvgPnL': float(g['pnl'].mean()) if len(g) else np.nan,
+            'AvgR': avg_r,
+        })
+
+    out['by_setup'] = trades_df.groupby('setup', dropna=False).apply(agg).reset_index()
+    out['by_reason'] = trades_df.groupby('reason', dropna=False).apply(agg).reset_index()
+    return out
+
+
 def run_backtest(data: dict, cfg: dict):
-    """Daily backtest.
-
-    Swing preset support:
-      - hard risk-on gate (if configured): no new entries when market is risk-off
-      - daily fill up to max_positions + weekly rerank selection (if configured)
-      - optional cup-with-handle detector + momentum scoring
-    """
-
     symbols = cfg['symbols']
     regime_symbol = cfg['regime_symbol']
 
@@ -228,18 +219,15 @@ def run_backtest(data: dict, cfg: dict):
     if missing:
         raise ValueError(f"Missing symbols in loaded data: {missing}")
 
-    # master calendar from regime symbol
     start = pd.Timestamp(cfg['start'])
     end = pd.Timestamp(cfg['end'])
     idx = data[regime_symbol].index
     idx = idx[(idx >= start) & (idx <= end)]
 
-    # reindex regime and inverse symbols to master calendar (keep NaN; we will guard)
     for s in [regime_symbol] + list(cfg.get('inverse_map', {}).values()):
         if s in data:
             data[s] = data[s].reindex(idx)
 
-    # indicators
     for s in needed:
         df = data[s]
         if not df.index.equals(idx):
@@ -248,25 +236,17 @@ def run_backtest(data: dict, cfg: dict):
 
         df['ATR'] = atr(df, cfg['atr_period'])
         df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
-
-        # 55d breakout by close confirmation (pivot = rolling max of prior closes)
         df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
-
-        # still compute HH/LL for legacy / intraday scan use
         df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
         df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
-
         df['DollarVol'] = dollar_volume(df)
 
-        # momentum features
         mom_n = int(cfg.get('mom_lookback', 126))
         df['Mom'] = pct_return(df['Close'], mom_n)
 
-        # volume confirmation proxy
         df['VolSMA50'] = sma(df['Volume'], 50)
         df['VolSMA20'] = sma(df['Volume'], 20)
 
-        # cup-with-handle detector
         if bool(cfg.get('enable_cwh', True)):
             data[s] = detect_cup_handle(df, cfg)
 
@@ -283,7 +263,6 @@ def run_backtest(data: dict, cfg: dict):
     hard_risk_on = bool(cfg.get('hard_risk_on', False))
     weekly_rerank = bool(cfg.get('weekly_rerank', True))
 
-    # trailing stop config
     use_trailing = bool(cfg.get('use_trailing_stop', True))
     trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
 
@@ -297,7 +276,6 @@ def run_backtest(data: dict, cfg: dict):
         return float(eq)
 
     def is_weekly_rebalance_day(date: pd.Timestamp) -> bool:
-        # Monday = 0
         wd = int(date.weekday())
         return wd == int(cfg.get('weekly_rebalance_weekday', 0))
 
@@ -306,11 +284,9 @@ def run_backtest(data: dict, cfg: dict):
         if pd.isna(row.get('ATR')) or float(row['ATR']) <= 0:
             return -np.inf
 
-        # momentum (6m) + breakout strength + volume confirmation, penalize high volatility
         mom = row.get('Mom')
         mom_v = float(mom) if (mom is not None and not pd.isna(mom)) else 0.0
 
-        # volatility penalty: ATR / Close
         vol_pen = 0.0
         if not pd.isna(row.get('Close')) and float(row['Close']) > 0:
             vol_pen = float(row['ATR']) / float(row['Close'])
@@ -320,7 +296,6 @@ def run_backtest(data: dict, cfg: dict):
             if float(row['VolSMA20']) > float(row['VolSMA50']):
                 vol_ok = 1.0
 
-        # breakout strength uses close vs pivot close
         pivot = row.get('PivotClose')
         brk = 0.0
         if pivot is not None and not pd.isna(pivot):
@@ -329,7 +304,6 @@ def run_backtest(data: dict, cfg: dict):
         return (2.0 * mom_v) + (1.0 * brk) + (0.3 * vol_ok) - (2.0 * vol_pen)
 
     for i, date in enumerate(idx):
-        # exits first
         new_open = []
         for p in open_positions:
             df = data[p['symbol']]
@@ -344,7 +318,6 @@ def run_backtest(data: dict, cfg: dict):
             l = float(l)
             c = float(c)
 
-            # trailing stop update
             if use_trailing:
                 atr_raw = df.loc[date, 'ATR']
                 if not pd.isna(atr_raw) and float(atr_raw) > 0:
@@ -370,6 +343,12 @@ def run_backtest(data: dict, cfg: dict):
 
             exit_px_eff = exit_px * (1 - spread)
             cash += p['shares'] * exit_px_eff
+
+            initial_risk_per_share = float(p.get('initial_risk_per_share', np.nan))
+            r_mult = np.nan
+            if np.isfinite(initial_risk_per_share) and initial_risk_per_share > 0:
+                r_mult = float((exit_px_eff - p['entry_px']) / initial_risk_per_share)
+
             trades.append(
                 {
                     'symbol': p['symbol'],
@@ -382,6 +361,8 @@ def run_backtest(data: dict, cfg: dict):
                     'pnl': (exit_px_eff - p['entry_px']) * p['shares'],
                     'reason': reason,
                     'setup': p.get('setup', 'BREAKOUT'),
+                    'initial_risk_per_share': initial_risk_per_share,
+                    'R_multiple': r_mult,
                 }
             )
 
@@ -390,8 +371,8 @@ def run_backtest(data: dict, cfg: dict):
         eq_today = mark_to_market(date)
         equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash, 'OpenPositions': len(open_positions)})
 
-        # weekly rerank: drop weakest positions (optional)
         risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False
+
         if weekly_rerank and risk_on and is_weekly_rebalance_day(date) and open_positions:
             scored = []
             for p in open_positions:
@@ -400,7 +381,7 @@ def run_backtest(data: dict, cfg: dict):
             scored.sort(key=lambda x: x[1], reverse=True)
             keep = scored[: int(cfg['max_positions'])]
             keep_syms = set([p['symbol'] for p, _ in keep])
-            # close dropped at close
+
             new_open = []
             for p in open_positions:
                 if p['symbol'] in keep_syms:
@@ -412,6 +393,12 @@ def run_backtest(data: dict, cfg: dict):
                     continue
                 exit_px_eff = float(c) * (1 - spread)
                 cash += p['shares'] * exit_px_eff
+
+                initial_risk_per_share = float(p.get('initial_risk_per_share', np.nan))
+                r_mult = np.nan
+                if np.isfinite(initial_risk_per_share) and initial_risk_per_share > 0:
+                    r_mult = float((exit_px_eff - p['entry_px']) / initial_risk_per_share)
+
                 trades.append(
                     {
                         'symbol': p['symbol'],
@@ -424,16 +411,16 @@ def run_backtest(data: dict, cfg: dict):
                         'pnl': (exit_px_eff - p['entry_px']) * p['shares'],
                         'reason': 'RERANK',
                         'setup': p.get('setup', 'BREAKOUT'),
+                        'initial_risk_per_share': initial_risk_per_share,
+                        'R_multiple': r_mult,
                     }
                 )
             open_positions = new_open
 
-        # entries require next open
         if i >= len(idx) - 1:
             continue
         next_date = idx[i + 1]
 
-        # hard gate: no entries when risk off
         if hard_risk_on and (not risk_on):
             continue
 
@@ -453,13 +440,10 @@ def run_backtest(data: dict, cfg: dict):
                     continue
 
                 setup = None
-
-                # 55d close breakout
                 piv = row.get('PivotClose')
                 if piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
                     setup = 'BREAKOUT'
 
-                # cup-with-handle breakout
                 if bool(cfg.get('enable_cwh', True)) and bool(row.get('CWH_Signal', False)):
                     setup = 'CUP_HANDLE'
 
@@ -467,7 +451,6 @@ def run_backtest(data: dict, cfg: dict):
                     continue
 
                 sc = score_candidate(sym, date)
-                # slight bonus if CWH has vol confirmation
                 if setup == 'CUP_HANDLE' and bool(row.get('CWH_VolOK', False)):
                     sc += float(cfg.get('cwh_vol_bonus', 0.3))
 
@@ -532,6 +515,7 @@ def run_backtest(data: dict, cfg: dict):
                     'stop': float(stop),
                     'tp': tp,
                     'setup': setup,
+                    'initial_risk_per_share': float(entry_px_eff - float(stop)),
                 }
             )
 
@@ -561,4 +545,6 @@ def run_backtest(data: dict, cfg: dict):
         **stats,
     }
 
-    return equity_df, trades_df, summary
+    breakdown = breakdown_tables(trades_df)
+
+    return equity_df, trades_df, summary, breakdown
