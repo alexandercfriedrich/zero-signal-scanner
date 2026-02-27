@@ -34,7 +34,7 @@ DEFAULT_CFG = {
   "atr_stop_mult": 2.0,
   "use_trailing_stop": True,
   "atr_trail_mult": 2.5,
-  "trailing_reference": "high",
+  "trailing_reference": "close",
 
   "breakout_lookback": 55,
   "breakout_level_source": "close",
@@ -646,7 +646,7 @@ if run_btn:
             breakout_strength = (px - float(bl)) / float(atr_v)
 
             # Extension cap
-            if scan_max_ext < 1e8 and breakout_strength > scan_max_ext:
+            if scan_max_ext < 1e9 and breakout_strength > scan_max_ext:
                 continue
 
             # RSI filter
@@ -702,7 +702,7 @@ if run_btn:
                 'breakout_level': st.column_config.NumberColumn('Ausbruchsniveau', help='Breakout-Level (Close- oder High-Basis je nach `breakout_level_source`)', format='%.2f'),
                 'asof': st.column_config.TextColumn('Datum', help='Datum des letzten Handelstags'),
                 'atr': st.column_config.NumberColumn('ATR', help='Average True Range (14 Tage) – Maß für Volatilität', format='%.2f'),
-                'risk_per_share': st.column_config.NumberColumn('Risiko/Aktie', help='Risiko je Aktie = ATR × Stop-Multipliklikator', format='%.2f'),
+                'risk_per_share': st.column_config.NumberColumn('Risiko/Aktie', help='Risiko je Aktie = ATR × Stop-Multiplikator', format='%.2f'),
                 'stop_price': st.column_config.NumberColumn('Stop-Loss', help='Stop-Loss-Kurs = Kurs − Risiko/Aktie', format='%.2f'),
                 'tp_price': st.column_config.NumberColumn('Take-Profit', help='Take-Profit = Kurs + 2 × Risiko/Aktie', format='%.2f'),
                 'shares_for_1000eur': st.column_config.NumberColumn('Stück/1000€', help='Stückzahl bei 1.000 € Konto und 1 % Risiko pro Trade'),
