@@ -51,6 +51,16 @@ def pct_return(close: pd.Series, n: int) -> pd.Series:
     return close / close.shift(n) - 1
 
 
+def rsi(close: pd.Series, n: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.rolling(n, min_periods=n).mean()
+    avg_loss = loss.rolling(n, min_periods=n).mean()
+    rs = avg_gain / (avg_loss + 1e-12)
+    return 100 - (100 / (1 + rs))
+
+
 def detect_cup_handle(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
     close = df['Close']
@@ -252,6 +262,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         df['VolSMA50'] = sma(df['Volume'], 50)
         df['VolSMA20'] = sma(df['Volume'], 20)
 
+        rsi_p = int(cfg.get('rsi_period', 0))
+        if rsi_p > 0:
+            df['RSI'] = rsi(df['Close'], rsi_p)
+
         if bool(cfg.get('enable_cwh', True)):
             data[s] = detect_cup_handle(df, cfg)
 
@@ -273,6 +287,18 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
     use_trailing = bool(cfg.get('use_trailing_stop', True))
     trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
+
+    bl_source = cfg.get('breakout_level_source', 'close')
+    trailing_ref = cfg.get('trailing_reference', 'high')
+    confirm = int(cfg.get('breakout_confirm_closes', 1))
+    rsi_period_cfg = int(cfg.get('rsi_period', 0))
+    rsi_max_cfg = float(cfg.get('rsi_max', 100))
+    max_ext = float(cfg.get('max_breakout_extension_atr', 1e9))
+    min_bvm = float(cfg.get('min_breakout_vol_mult', 0.0))
+    corr_lookback = int(cfg.get('corr_lookback_days', 60))
+    max_corr = float(cfg.get('max_pair_corr', 1.0))
+    sector_map = cfg.get('sector_map', {})
+    max_per_sector = int(cfg.get('max_positions_per_sector', 999))
 
     def mark_to_market(date):
         eq = cash
@@ -304,7 +330,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
             if float(row['VolSMA20']) > float(row['VolSMA50']):
                 vol_ok = 1.0
 
-        pivot = row.get('PivotClose')
+        pivot = row.get('PivotClose') if bl_source == 'close' else row.get('HH')
         brk = 0.0
         if pivot is not None and not pd.isna(pivot):
             brk = (float(row['Close']) - float(pivot)) / float(row['ATR'])
@@ -334,7 +360,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
             if use_trailing:
                 atr_raw = df.loc[date, 'ATR']
                 if not pd.isna(atr_raw) and float(atr_raw) > 0:
-                    new_stop = c - trail_mult * float(atr_raw)
+                    if trailing_ref == 'high':
+                        p['peak_high'] = float(max(p.get('peak_high', h), h))
+                        new_stop = p['peak_high'] - trail_mult * float(atr_raw)
+                    else:
+                        new_stop = c - trail_mult * float(atr_raw)
                     p['stop'] = float(max(p['stop'], new_stop))
 
             exit_px = None
@@ -453,9 +483,40 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     continue
 
                 setup = None
-                piv = row.get('PivotClose')
+                piv = row.get('PivotClose') if bl_source == 'close' else row.get('HH')
                 if piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
                     setup = 'BREAKOUT'
+                    # Consecutive-close confirmation
+                    if confirm >= 2:
+                        confirmed = True
+                        for k in range(1, confirm):
+                            if i - k < 0:
+                                confirmed = False
+                                break
+                            prev_d = idx[i - k]
+                            pr = data[sym].loc[prev_d]
+                            prev_bl = pr.get('PivotClose') if bl_source == 'close' else pr.get('HH')
+                            if pd.isna(prev_bl) or float(pr['Close']) <= float(prev_bl):
+                                confirmed = False
+                                break
+                        if not confirmed:
+                            setup = None
+                    # Extension cap
+                    if setup is not None and max_ext < 1e8:
+                        extension = (float(row['Close']) - float(piv)) / float(row['ATR'])
+                        if extension > max_ext:
+                            setup = None
+                    # RSI filter
+                    if setup is not None and rsi_period_cfg > 0 and rsi_max_cfg < 100:
+                        rsi_val = row.get('RSI')
+                        if pd.isna(rsi_val) or float(rsi_val) > rsi_max_cfg:
+                            setup = None
+                    # Volume confirmation
+                    if setup is not None and min_bvm > 0:
+                        vol = row.get('Volume')
+                        vsma50 = row.get('VolSMA50')
+                        if pd.isna(vol) or pd.isna(vsma50) or float(vsma50) <= 0 or float(vol) < min_bvm * float(vsma50):
+                            setup = None
 
                 if bool(cfg.get('enable_cwh', True)) and bool(row.get('CWH_Signal', False)):
                     setup = 'CUP_HANDLE'
@@ -517,6 +578,31 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     continue
                 cost = shares * entry_px_eff
 
+            # Sector cap filter
+            if max_per_sector < 999:
+                sym_sector = sector_map.get(sym, 'Unknown')
+                sec_count = sum(1 for p in open_positions if sector_map.get(p['symbol'], 'Unknown') == sym_sector)
+                if sec_count >= max_per_sector:
+                    continue
+
+            # Correlation filter
+            if max_corr < 1.0 and open_positions:
+                cand_close = data[sym]['Close'].loc[:date]
+                cand_ret = cand_close.iloc[-corr_lookback:].pct_change().dropna()
+                too_corr = False
+                for op in open_positions:
+                    op_close = data[op['symbol']]['Close'].loc[:date]
+                    op_ret = op_close.iloc[-corr_lookback:].pct_change().dropna()
+                    common_idx = cand_ret.index.intersection(op_ret.index)
+                    if len(common_idx) < 10:
+                        continue
+                    c_val = float(cand_ret.loc[common_idx].corr(op_ret.loc[common_idx]))
+                    if np.isfinite(c_val) and c_val > max_corr:
+                        too_corr = True
+                        break
+                if too_corr:
+                    continue
+
             cash -= cost
             open_positions.append(
                 {
@@ -529,6 +615,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     'tp': tp,
                     'setup': setup,
                     'initial_risk_per_share': float(entry_px_eff - float(stop)),
+                    'peak_high': float(entry_px),
                 }
             )
 
