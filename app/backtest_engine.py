@@ -57,6 +57,9 @@ def run_backtest(data: dict, cfg: dict):
     We therefore:
       - use the regime symbol calendar as the master index
       - for each symbol on each day, skip if data is missing
+
+    Swing preset support:
+      - hard risk-on gate (if configured): no new entries when market is risk-off
     """
 
     symbols = cfg['symbols']
@@ -104,6 +107,9 @@ def run_backtest(data: dict, cfg: dict):
     open_positions = []
     trades = []
 
+    # swing preset: hard gate
+    hard_risk_on = bool(cfg.get('hard_risk_on', False))
+
     def mark_to_market(date):
         eq = cash
         for p in open_positions:
@@ -125,7 +131,9 @@ def run_backtest(data: dict, cfg: dict):
                 new_open.append(p)
                 continue
 
-            h = float(h); l = float(l); c = float(c)
+            h = float(h)
+            l = float(l)
+            c = float(c)
 
             exit_px = None
             reason = None
@@ -172,6 +180,11 @@ def run_backtest(data: dict, cfg: dict):
         next_date = idx[i + 1]
 
         risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False
+
+        # hard gate: no entries when risk off
+        if hard_risk_on and (not risk_on):
+            continue
+
         if len(open_positions) >= cfg['max_positions']:
             continue
 
@@ -191,6 +204,7 @@ def run_backtest(data: dict, cfg: dict):
                     score = (float(row['Close']) - float(row['HH'])) / float(row['ATR'])
                     candidates.append((sym, score))
         else:
+            # legacy risk-off hedge behavior (disabled when hard_risk_on is True)
             inv = cfg.get('inverse_map', {}).get(regime_symbol)
             if inv and inv in data:
                 row = reg.loc[date]
