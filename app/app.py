@@ -11,7 +11,7 @@ import yfinance as yf
 
 from backtest_engine import run_backtest
 
-st.set_page_config(page_title='Signal Scanner (US+EU, Intraday)', layout='wide')
+st.set_page_config(page_title='3S- Stock Signal Scanner by AF', layout='wide')
 
 CACHE_DIR = Path.home() / '.zero_swing_cache'
 CACHE_DIR.mkdir(exist_ok=True)
@@ -77,8 +77,24 @@ def load_preset_cfg(preset_name: str) -> dict:
         return dict(DEFAULT_CFG)
 
 
-st.title('Signal‑Scanner: S&P 500 + EU (ISIN/WKN/Name) + Intraday Updates')
-st.caption('S&P 500 auto, EU Resolver (DE/AT), yfinance Download + Disk‑Cache. Intraday scan compares latest intraday price vs daily breakout levels.')
+st.title('3S- Stock Signal Scanner by AF')
+st.markdown("""
+**Was macht dieser Scanner?**  
+Der 3S Stock Signal Scanner durchsucht täglich Aktien aus dem S&P 500 und europäischen Märkten nach technischen Ausbruchssignalen.
+
+**Gesuchte Signale:**
+- 📈 **Intraday-Breakout**: Aktueller Intraday-Kurs überschreitet das 55-Tage-Tageshoch
+- 📊 **Daily Close-Breakout**: Tagesschlusskurs überschreitet das 55-Tage-Hoch
+
+**Einstieg & Ausstieg (Backtest-Logik):**
+- **Einstieg**: Am nächsten Handelstag zum Eröffnungskurs (Next-Day Open)
+- **Stop-Loss**: ATR-basierter initialer Stop (ATR × Multiplikator)
+- **Trailing Stop** *(optional)*: ATR-Trailing aktivierbar
+- **Take-Profit** *(optional)*: Nur wenn Trailing deaktiviert
+- **Maximale Haltedauer**: Zeitbasierter Exit nach konfigurierbaren Tagen
+- **Weekly Rerank** *(optional)*: Schwache Positionen werden wöchentlich ersetzt
+- **Regime-Filter**: Käufe nur wenn SPY > SMA 200 (Risk-On)
+""")
 
 with st.sidebar:
     st.header('Universe')
@@ -507,7 +523,41 @@ if run_btn:
 
         ui_status.caption('Daily scan: done')
         st.subheader(f'Daily Signale (RiskOn={risk_on})')
-        st.dataframe(pd.DataFrame(rows).sort_values('atr', ascending=False), use_container_width=True)
+        df_sig = pd.DataFrame(rows)
+        if not df_sig.empty:
+            df_sig['breakout_strength'] = (df_sig['price'] - df_sig['breakout_level']) / df_sig['atr']
+            df_sig['Sicherheit'] = (10.0 / (1.0 + df_sig['breakout_strength'])).round(1)
+            df_sig = df_sig.drop(columns=['breakout_strength']).sort_values('Sicherheit', ascending=False)
+
+            def _color_sicherheit(val):
+                ratio = float(val) / 10.0
+                r = int(255 * (1.0 - ratio))
+                g = int(200 * ratio)
+                return f'background-color: rgba({r},{g},80,0.35)'
+
+            styled = df_sig.style.map(_color_sicherheit, subset=['Sicherheit'])
+            col_cfg = {
+                'symbol': st.column_config.TextColumn('Symbol', help='Aktien-Ticker-Symbol'),
+                'side': st.column_config.TextColumn('Richtung', help='Handelsrichtung (LONG/SHORT)'),
+                'price': st.column_config.NumberColumn('Kurs', help='Letzter Schlusskurs', format='%.2f'),
+                'breakout_level': st.column_config.NumberColumn('Ausbruchsniveau', help='55-Tage-Hoch (Breakout-Level)', format='%.2f'),
+                'asof': st.column_config.TextColumn('Datum', help='Datum des letzten Handelstags'),
+                'atr': st.column_config.NumberColumn('ATR', help='Average True Range (14 Tage) – Maß für Volatilität', format='%.2f'),
+                'risk_per_share': st.column_config.NumberColumn('Risiko/Aktie', help='Risiko je Aktie = ATR × Stop-Multiplikator', format='%.2f'),
+                'stop_price': st.column_config.NumberColumn('Stop-Loss', help='Stop-Loss-Kurs = Kurs − Risiko/Aktie', format='%.2f'),
+                'tp_price': st.column_config.NumberColumn('Take-Profit', help='Take-Profit = Kurs + 2 × Risiko/Aktie', format='%.2f'),
+                'shares_for_1000eur': st.column_config.NumberColumn('Stück/1000€', help='Stückzahl bei 1.000 € Konto und 1 % Risiko pro Trade'),
+                'Sicherheit': st.column_config.NumberColumn('Sicherheit ★', help='Sicherheitsscore 0–10: Höher = näher am Ausbruchsniveau (weniger überschossen)', format='%.1f'),
+            }
+            st.dataframe(styled, column_config=col_cfg, use_container_width=True)
+            st.download_button(
+                '⬇ Download daily_signals.csv',
+                data=df_sig.to_csv(index=False).encode('utf-8'),
+                file_name='daily_signals.csv',
+                mime='text/csv',
+            )
+        else:
+            st.info('Keine Daily-Signale gefunden.')
 
     else:
         ui_status.caption('Daily Daten laden...')
