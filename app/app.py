@@ -34,7 +34,7 @@ DEFAULT_CFG = {
   "atr_stop_mult": 2.0,
   "use_trailing_stop": True,
   "atr_trail_mult": 2.5,
-  "trailing_reference": "high",
+  "trailing_reference": "close",
   "take_profit_R": 2.0,
 
   "breakout_lookback": 55,
@@ -191,7 +191,7 @@ with st.sidebar:
 | `atr_stop_mult` | `2.0` | Initialer Stop-Abstand = ATR × Multiplikator |
 | `use_trailing_stop` | `true` | Wenn `true`: Trailing-Stop aktiv, Take-Profit wird ignoriert |
 | `atr_trail_mult` | `2.5` | Trailing-Stop Abstand = ATR × Multiplikator |
-| `trailing_reference` | `"high"` | Trailing-Stop-Basis: `"high"` = Chandelier (Höchstkurs), `"close"` = Schlusskurs |
+| `trailing_reference` | `"close"` | Trailing-Stop-Basis: `"high"` = Chandelier (Höchstkurs), `"close"` = Schlusskurs |
 | `take_profit_R` | `2.0` | Take-Profit in R (nur wenn `use_trailing_stop=false`) |
 | `breakout_lookback` | `55` | Lookback für Breakout-Level (z.B. 55-Tage Hoch) |
 | `breakout_level_source` | `"close"` | Breakout-Level: `"close"` = Schlusskurshoch, `"high"` = Tageshoch |
