@@ -61,9 +61,36 @@ with st.sidebar:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def load_sp500_symbols() -> list[str]:
-    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    tables = pd.read_html(url)
-    df = tables[0]
+    """Load S&P 500 tickers.
+
+    Streamlit Cloud sometimes blocks/ratelimits Wikipedia HTML parsing via pandas.read_html.
+    We therefore try:
+      1) Wikipedia via requests + pandas.read_html on the HTML text
+      2) GitHub raw CSV fallback (datasets repo)
+    """
+
+    # 1) Wikipedia (preferred)
+    wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+    try:
+        r = requests.get(
+            wiki_url,
+            timeout=25,
+            headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'}
+        )
+        r.raise_for_status()
+        tables = pd.read_html(r.text)
+        df = tables[0]
+        syms = df['Symbol'].astype(str).str.upper().tolist()
+        return [s.replace('.', '-') for s in syms]
+    except Exception:
+        pass
+
+    # 2) Fallback: raw CSV from GitHub datasets (more stable than HTML scraping)
+    # Source: https://github.com/datasets/s-and-p-500-companies
+    raw_csv = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv'
+    r = requests.get(raw_csv, timeout=25, headers={'User-Agent': 'Mozilla/5.0 (zero-signal-scanner)'})
+    r.raise_for_status()
+    df = pd.read_csv(pd.io.common.StringIO(r.text))
     syms = df['Symbol'].astype(str).str.upper().tolist()
     return [s.replace('.', '-') for s in syms]
 
@@ -218,7 +245,7 @@ def load_intraday(symbols: list[str], interval: str, period: str) -> dict[str, p
         if p.exists():
             try:
                 d = pd.read_parquet(p)
-                col = 'Datetime' if 'Datetime' in d.columns else ('Date' if 'Date' in d.columns else None)
+                col = 'Datetime' if 'Datetime' in d.columns else ('Date' if 'Date' in columns else None)
                 if col:
                     d[col] = pd.to_datetime(d[col])
                     if d[col].max().date() >= (pd.Timestamp.today().date() - pd.Timedelta(days=1)):
