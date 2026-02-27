@@ -57,6 +57,26 @@ DEFAULT_CFG = {
   "initial_cash": 5000
 }
 
+# Presets (loaded from JSON files in app/)
+PRESETS = {
+    'Swing (Top-5, Risk-On only)': None,  # uses DEFAULT_CFG
+    'Best (2011-2026)': 'config_best_2011_2026.json',
+}
+
+
+def load_preset_cfg(preset_name: str) -> dict:
+    """Load preset config dict. Returns DEFAULT_CFG for the default preset."""
+    p = PRESETS.get(preset_name)
+    if not p:
+        return dict(DEFAULT_CFG)
+    preset_path = (Path(__file__).parent / p)
+    try:
+        return json.loads(preset_path.read_text())
+    except Exception:
+        # Fall back to default if file is missing or invalid
+        return dict(DEFAULT_CFG)
+
+
 st.title('Signal‑Scanner: S&P 500 + EU (ISIN/WKN/Name) + Intraday Updates')
 st.caption('S&P 500 auto, EU Resolver (DE/AT), yfinance Download + Disk‑Cache. Intraday scan compares latest intraday price vs daily breakout levels.')
 
@@ -77,10 +97,20 @@ with st.sidebar:
     throttle_s = st.slider('Resolver Throttle (Sek.)', 0.0, 1.0, 0.2, 0.05)
 
     st.header('Konfiguration')
-    preset = st.selectbox('Preset', ['Swing (Top-5, Risk-On only)'], index=0)
-    cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
 
-    cfg_text = st.text_area('config.json (ohne symbols)', value=cfg_default_text, height=420)
+    preset = st.selectbox('Preset', list(PRESETS.keys()), index=1)
+
+    # Initialize config text once from the selected default preset
+    if 'cfg_text' not in st.session_state:
+        st.session_state['cfg_text'] = json.dumps(load_preset_cfg(preset), indent=2)
+
+    # When preset changes, replace textarea content
+    prev_preset = st.session_state.get('preset_name')
+    if prev_preset != preset:
+        st.session_state['cfg_text'] = json.dumps(load_preset_cfg(preset), indent=2)
+        st.session_state['preset_name'] = preset
+
+    cfg_text = st.text_area('config.json (ohne symbols)', value=st.session_state['cfg_text'], height=420)
     run_btn = st.button('Start', type='primary')
 
 
