@@ -20,15 +20,16 @@ DEFAULT_CFG = {
   "end": "2026-02-27",
   "regime_symbol": "SPY",
   "inverse_map": {"SPY": "SH"},
+  "hard_risk_on": True,
   "max_new_trades_per_day": 2,
-  "max_positions": 2,
+  "max_positions": 5,
   "risk_per_trade": 0.01,
   "atr_period": 14,
   "atr_stop_mult": 1.5,
-  "breakout_lookback": 20,
+  "breakout_lookback": 55,
   "sma_regime": 200,
   "take_profit_R": 2.0,
-  "max_holding_days": 5,
+  "max_holding_days": 20,
   "spread_bps_per_side": 8,
   "min_price": 2.0,
   "min_dollar_volume": 2_000_000,
@@ -55,7 +56,13 @@ with st.sidebar:
     throttle_s = st.slider('Resolver Throttle (Sek.)', 0.0, 1.0, 0.2, 0.05)
 
     st.header('Konfiguration')
-    cfg_text = st.text_area('config.json (ohne symbols)', value=json.dumps(DEFAULT_CFG, indent=2), height=360)
+    preset = st.selectbox('Preset', ['Swing (Top-5, Risk-On only)'], index=0)
+    if preset == 'Swing (Top-5, Risk-On only)':
+        cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
+    else:
+        cfg_default_text = json.dumps(DEFAULT_CFG, indent=2)
+
+    cfg_text = st.text_area('config.json (ohne symbols)', value=cfg_default_text, height=360)
     run_btn = st.button('Start', type='primary')
 
 
