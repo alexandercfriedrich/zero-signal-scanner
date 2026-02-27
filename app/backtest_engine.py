@@ -228,7 +228,12 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
             data[s] = data[s].reindex(idx)
 
     # indicators
-    for s in needed:
+    needed_list = sorted(list(needed))
+    total_syms = len(needed_list)
+    for j, s in enumerate(needed_list):
+        if progress_cb is not None:
+            progress_cb(j, total_syms, f'Indicators: {j}/{total_syms} ({s})')
+
         df = data[s]
         if not df.index.equals(idx):
             df = df.reindex(idx)
@@ -249,6 +254,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
         if bool(cfg.get('enable_cwh', True)):
             data[s] = detect_cup_handle(df, cfg)
+
+    if progress_cb is not None:
+        progress_cb(total_syms, total_syms, f'Indicators: {total_syms}/{total_syms} (done)')
 
     reg = data[regime_symbol]
     reg['RiskOn'] = reg['Close'] > reg['SMA_regime']
