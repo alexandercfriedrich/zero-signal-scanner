@@ -85,13 +85,7 @@ with st.sidebar:
 
 @st.cache_data(ttl=6*60*60, show_spinner=False)
 def load_sp500_symbols() -> list[str]:
-    """Load S&P 500 tickers.
-
-    Streamlit Cloud sometimes blocks/ratelimits Wikipedia HTML parsing via pandas.read_html.
-    We therefore try:
-      1) Wikipedia via requests + pandas.read_html on the HTML text
-      2) GitHub raw CSV fallback (datasets repo)
-    """
+    """Load S&P 500 tickers."""
 
     wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
     try:
@@ -230,7 +224,7 @@ def unpack_download(df, batch):
     return out
 
 
-def load_daily(symbols: list[str], start: str, end: str) -> dict[str, pd.DataFrame]:
+def load_daily(symbols: list[str], start: str, end: str, progress_cb=None) -> dict[str, pd.DataFrame]:
     out = {}
     need = []
     for s in symbols:
@@ -248,16 +242,22 @@ def load_daily(symbols: list[str], start: str, end: str) -> dict[str, pd.DataFra
 
     if need:
         chunk = 80
-        for i in range(0, len(need), chunk):
+        total = int(np.ceil(len(need) / chunk))
+        for k, i in enumerate(range(0, len(need), chunk)):
             batch = need[i:i+chunk]
+            if progress_cb is not None:
+                progress_cb(k, total, f'Daily: {i}/{len(need)}')
             got = unpack_download(fetch_yf(batch, start=start, end=end, interval='1d'), batch)
             for sym, sub in got.items():
                 out[sym] = sub
                 sub.to_parquet(cache_path(sym, '1d'), index=False)
+        if progress_cb is not None:
+            progress_cb(total, total, 'Daily: done')
+
     return out
 
 
-def load_intraday(symbols: list[str], interval: str, period: str) -> dict[str, pd.DataFrame]:
+def load_intraday(symbols: list[str], interval: str, period: str, progress_cb=None) -> dict[str, pd.DataFrame]:
     out = {}
     kind = f'{interval}_{period}'
     need = []
@@ -278,8 +278,11 @@ def load_intraday(symbols: list[str], interval: str, period: str) -> dict[str, p
 
     if need:
         chunk = 60
-        for i in range(0, len(need), chunk):
+        total = int(np.ceil(len(need) / chunk))
+        for k, i in enumerate(range(0, len(need), chunk)):
             batch = need[i:i+chunk]
+            if progress_cb is not None:
+                progress_cb(k, total, f'Intraday: {i}/{len(need)}')
             got = unpack_download(fetch_yf(batch, interval=interval, period=period), batch)
             for sym, sub in got.items():
                 if 'Datetime' not in sub.columns:
@@ -289,6 +292,9 @@ def load_intraday(symbols: list[str], interval: str, period: str) -> dict[str, p
                         sub = sub.rename(columns={'index':'Datetime'})
                 out[sym] = sub
                 sub.to_parquet(cache_path(sym, kind), index=False)
+        if progress_cb is not None:
+            progress_cb(total, total, 'Intraday: done')
+
     return out
 
 
@@ -366,13 +372,30 @@ if run_btn:
     cfg['symbols'] = [s for s in symbols if s not in [cfg['regime_symbol']] and s not in cfg.get('inverse_map', {}).values()]
     needed_daily = sorted(list(set(cfg['symbols'] + [cfg['regime_symbol']] + list(cfg.get('inverse_map', {}).values()))))
 
+    ui_prog = st.progress(0.0)
+    ui_status = st.empty()
+
+    def prog_step(done, total, msg):
+        frac = 0.0 if total <= 0 else float(done) / float(total)
+        ui_prog.progress(min(1.0, max(0.0, frac)))
+        ui_status.caption(msg)
+
     if action == 'Backtest (Daily, 5y)':
-        with st.spinner(f'Daily Daten laden ({len(needed_daily)})...'):
-            daily = load_daily(needed_daily, cfg['start'], cfg['end'])
+        ui_status.caption('Daily Daten laden...')
+        daily = load_daily(needed_daily, cfg['start'], cfg['end'], progress_cb=lambda d,t,m: prog_step(d, t, m))
         cfg['symbols'] = [s for s in cfg['symbols'] if s in daily]
 
-        with st.spinner('Backtest läuft...'):
-            equity_df, trades_df, summary, breakdown = run_backtest(daily, cfg)
+        ui_status.caption('Backtest läuft...')
+        bt_prog = st.progress(0.0)
+        bt_status = st.empty()
+
+        def bt_step(done, total, date):
+            frac = 0.0 if total <= 0 else float(done) / float(total)
+            bt_prog.progress(min(1.0, max(0.0, frac)))
+            bt_status.caption(f'Backtest: {done}/{total}  ({date.date().isoformat()})')
+
+        equity_df, trades_df, summary, breakdown = run_backtest(daily, cfg, progress_cb=bt_step)
+        bt_status.caption('Backtest: done')
 
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric('Final Equity', f"{summary['final_equity']:.2f}")
@@ -423,8 +446,8 @@ if run_btn:
         st.dataframe(trades_df, use_container_width=True)
 
     elif action == 'Daily Signalscan':
-        with st.spinner(f'Daily Daten laden ({len(needed_daily)})...'):
-            daily = load_daily(needed_daily, cfg['start'], cfg['end'])
+        ui_status.caption('Daily Daten laden...')
+        daily = load_daily(needed_daily, cfg['start'], cfg['end'], progress_cb=lambda d,t,m: prog_step(d, t, m))
 
         reg = daily[cfg['regime_symbol']].copy(); reg['Date']=pd.to_datetime(reg['Date']); reg=reg.sort_values('Date').set_index('Date')
         risk_on = bool(reg['Close'].iloc[-1] > reg['Close'].rolling(cfg['sma_regime']).mean().iloc[-1])
@@ -448,15 +471,18 @@ if run_btn:
                 shares_for_1000eur = int(max(0, (1000.0 * float(cfg['risk_per_trade'])) // max(1e-9, risk_per_share)))
                 rows.append({'symbol': sym, 'side':'LONG', 'price':px, 'breakout_level':float(hh), 'asof': str(df.index[-1].date()), 'atr': float(atr_v), 'risk_per_share': risk_per_share, 'stop_price': stop_price, 'tp_price': tp_price, 'shares_for_1000eur': shares_for_1000eur})
 
+        ui_status.caption('Daily scan: done')
         st.subheader(f'Daily Signale (RiskOn={risk_on})')
         st.dataframe(pd.DataFrame(rows).sort_values('atr', ascending=False), use_container_width=True)
 
     else:
-        with st.spinner(f'Daily Daten laden ({len(needed_daily)})...'):
-            daily = load_daily(needed_daily, cfg['start'], cfg['end'])
-        with st.spinner(f'Intraday Daten laden ({len(needed_daily)})...'):
-            intra = load_intraday([s for s in needed_daily if s in daily], interval=intraday_interval, period=intraday_period)
+        ui_status.caption('Daily Daten laden...')
+        daily = load_daily(needed_daily, cfg['start'], cfg['end'], progress_cb=lambda d,t,m: prog_step(d, t, m))
+        ui_status.caption('Intraday Daten laden...')
+        intra = load_intraday([s for s in needed_daily if s in daily], interval=intraday_interval, period=intraday_period, progress_cb=lambda d,t,m: prog_step(d, t, m))
 
+        ui_status.caption('Intraday scan...')
         sig, risk_on = intraday_scan(daily, intra, cfg)
+        ui_status.caption('Intraday scan: done')
         st.subheader(f'Intraday Breakout‑Signale (RiskOn={risk_on})')
         st.dataframe(sig.head(50), use_container_width=True)
