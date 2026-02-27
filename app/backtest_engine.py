@@ -578,8 +578,8 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     continue
                 cost = shares * entry_px_eff
 
-            # Sector cap filter
-            if max_per_sector < 999:
+            # Sector cap filter (only if a sector_map exists; otherwise auto-disabled)
+            if max_per_sector < 999 and sector_map:
                 sym_sector = sector_map.get(sym, 'Unknown')
                 sec_count = sum(1 for p in open_positions if sector_map.get(p['symbol'], 'Unknown') == sym_sector)
                 if sec_count >= max_per_sector:
