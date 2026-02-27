@@ -35,6 +35,7 @@ DEFAULT_CFG = {
   "use_trailing_stop": True,
   "atr_trail_mult": 2.5,
   "trailing_reference": "high",
+  "take_profit_R": 2.0,
 
   "breakout_lookback": 55,
   "breakout_level_source": "close",
@@ -172,20 +173,54 @@ with st.sidebar:
 
     cfg_text = st.text_area('config.json (ohne symbols)', value=st.session_state['cfg_text'], height=420)
 
-    with st.expander('ℹ️ Neue Konfigurations-Parameter'):
+    with st.expander('ℹ️ Konfigurations-Parameter'):
         st.markdown("""
 | Parameter | Standard | Beschreibung |
 |---|---|---|
+| `start` | `"2021-02-27"` | Startdatum (YYYY-MM-DD) für Daily-Daten/Backtest-Zeitraum |
+| `end` | `"2026-02-27"` | Enddatum (YYYY-MM-DD) für Daily-Daten/Backtest-Zeitraum |
+| `regime_symbol` | `"SPY"` | Regime/Benchmark-Symbol (Risk-On Filter basiert darauf) |
+| `inverse_map` | `{ "SPY": "SH" }` | Mapping Regime→Inverse-ETF (falls du später Short/Inverse-Logik nutzt) |
+| `hard_risk_on` | `true` | Wenn `true`: keine neuen Trades, solange Risk-Off (Regime unter SMA) |
+| `max_new_trades_per_day` | `2` | Max. neue Einstiege pro Tag |
+| `max_positions` | `5` | Max. gleichzeitige Positionen |
+| `weekly_rerank` | `true` | Wenn `true`: wöchentlich neu ranken und schwache Positionen ersetzen |
+| `weekly_rebalance_weekday` | `0` | Wochentag fürs Rerank/Rebalance (0=Mo … 4=Fr) |
+| `risk_per_trade` | `0.01` | Risiko pro Trade als Anteil vom Equity (z.B. 0.01 = 1%) |
+| `atr_period` | `14` | ATR-Periode |
+| `atr_stop_mult` | `2.0` | Initialer Stop-Abstand = ATR × Multiplikator |
+| `use_trailing_stop` | `true` | Wenn `true`: Trailing-Stop aktiv, Take-Profit wird ignoriert |
+| `atr_trail_mult` | `2.5` | Trailing-Stop Abstand = ATR × Multiplikator |
 | `trailing_reference` | `"high"` | Trailing-Stop-Basis: `"high"` = Chandelier (Höchstkurs), `"close"` = Schlusskurs |
-| `breakout_level_source` | `"close"` | Ausbruchsniveau: `"close"` = Schlusskurshoch, `"high"` = Tageshoch |
+| `take_profit_R` | `2.0` | Take-Profit in R (nur wenn `use_trailing_stop=false`) |
+| `breakout_lookback` | `55` | Lookback für Breakout-Level (z.B. 55-Tage Hoch) |
+| `breakout_level_source` | `"close"` | Breakout-Level: `"close"` = Schlusskurshoch, `"high"` = Tageshoch |
 | `breakout_confirm_closes` | `1` | Anzahl aufeinanderfolgender Closes über Breakout-Level (1 = sofort, 2 = bestätigt) |
-| `min_breakout_vol_mult` | `0.0` | Mindest-Volumen: Volume ≥ N × VolSMA50 am Breakout-Tag (0 = deaktiviert) |
-| `rsi_period` | `0` | RSI-Periode für Overbought-Filter (0 = deaktiviert) |
-| `rsi_max` | `100` | Max. RSI beim Einstieg (z.B. 70 = kein Einstieg bei überkauft) |
-| `max_breakout_extension_atr` | `1e9` | Max. Ausdehnung in ATR-Einheiten über dem Level (1e9 = deaktiviert) |
+| `sma_regime` | `200` | SMA-Länge für Regime-Filter (SPY > SMA) |
+| `max_holding_days` | `30` | Max. Haltedauer in Kalendertagen (time-based exit) |
+| `min_breakout_vol_mult` | `0.0` | Volumenfilter: Volume ≥ N × VolSMA50 am Breakout-Tag (0 = aus) |
+| `rsi_period` | `0` | RSI-Periode für Overbought-Filter (0 = aus) |
+| `rsi_max` | `100` | Max. RSI beim Einstieg (z.B. 75 = kein Einstieg bei zu überkauft) |
+| `max_breakout_extension_atr` | `1e9` | Max. Ausdehnung über Level in ATR (1e9 = aus) |
+| `mom_lookback` | `126` | Momentum-Lookback in Tagen (für Ranking/Scoring) |
+| `enable_cwh` | `true` | Cup-with-Handle Setup aktivieren |
+| `cwh_cup_min_bars` | `30` | CWH: minimale Cup-Länge (Bars) |
+| `cwh_cup_max_bars` | `130` | CWH: maximale Cup-Länge (Bars) |
+| `cwh_handle_min_bars` | `5` | CWH: minimale Handle-Länge (Bars) |
+| `cwh_handle_max_bars` | `20` | CWH: maximale Handle-Länge (Bars) |
+| `cwh_max_cup_depth` | `0.35` | CWH: max. Cup-Depth (z.B. 0.35 = 35%) |
+| `cwh_max_handle_depth` | `0.15` | CWH: max. Handle-Depth |
+| `cwh_trend_sma` | `50` | CWH: Trendfilter SMA-Länge |
+| `cwh_vol_bonus` | `0.3` | CWH: Bonus im Scoring, wenn Volumen-Qualität passt |
 | `corr_lookback_days` | `60` | Lookback-Tage für Korrelationsfilter zwischen Positionen |
-| `max_pair_corr` | `1.0` | Max. Korrelation zu offenen Positionen (1.0 = deaktiviert) |
-| `max_positions_per_sector` | `999` | Max. Positionen pro Sektor (999 = deaktiviert, benötigt S&P 500 Universe) |
+| `max_pair_corr` | `1.0` | Max. Korrelation zu offenen Positionen (1.0 = aus) |
+| `max_positions_per_sector` | `999` | Max. Positionen pro Sektor (999 = aus; wirkt nur wenn `sector_map` vorhanden ist) |
+| `spread_bps_per_side` | `8` | Simulierter Spread pro Seite in Basispunkten (bps) |
+| `min_price` | `2.0` | Mindestkurs (Filter) |
+| `min_dollar_volume` | `2000000` | Mindest-Dollar-Volume (Close×Volume) für Liquiditätsfilter |
+| `initial_cash` | `5000` | Startkapital |
+| `symbols` | `[]` | Wird beim Klick auf Start automatisch aus dem Universe gesetzt (Eingaben im JSON werden überschrieben) |
+| `sector_map` | `{}` | Wird automatisch geladen (nur S&P 500); sonst leer und Sektor-Cap ist deaktiviert |
 """)
 
     run_btn = st.button('Start', type='primary')
