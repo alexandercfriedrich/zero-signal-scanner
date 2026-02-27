@@ -390,10 +390,13 @@ if run_btn:
         bt_prog = st.progress(0.0)
         bt_status = st.empty()
 
-        def bt_step(done, total, date):
+        def bt_step(done, total, date_or_msg):
             frac = 0.0 if total <= 0 else float(done) / float(total)
             bt_prog.progress(min(1.0, max(0.0, frac)))
-            bt_status.caption(f'Backtest: {done}/{total}  ({date.date().isoformat()})')
+            if isinstance(date_or_msg, str):
+                bt_status.caption(date_or_msg)
+            else:
+                bt_status.caption(f'Backtest: {done}/{total}  ({date_or_msg.date().isoformat()})')
 
         equity_df, trades_df, summary, breakdown = run_backtest(daily, cfg, progress_cb=bt_step)
         bt_status.caption('Backtest: done')
