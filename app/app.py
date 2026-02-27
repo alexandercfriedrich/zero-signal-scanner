@@ -372,7 +372,7 @@ if run_btn:
         cfg['symbols'] = [s for s in cfg['symbols'] if s in daily]
 
         with st.spinner('Backtest läuft...'):
-            equity_df, trades_df, summary = run_backtest(daily, cfg)
+            equity_df, trades_df, summary, breakdown = run_backtest(daily, cfg)
 
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric('Final Equity', f"{summary['final_equity']:.2f}")
@@ -386,7 +386,7 @@ if run_btn:
         m7.metric('Win Rate', '-' if pd.isna(summary.get('WinRate')) else f"{summary.get('WinRate')*100:.1f}%")
         m8.metric('Avg Win', '-' if pd.isna(summary.get('AvgWin')) else f"{summary.get('AvgWin'):.2f}")
         m9.metric('Avg Loss', '-' if pd.isna(summary.get('AvgLoss')) else f"{summary.get('AvgLoss'):.2f}")
-        m10.metric('Expectancy (R approx)', '-' if pd.isna(summary.get('Expectancy_R')) else f"{summary.get('Expectancy_R'):.2f}")
+        m10.metric('Expectancy (R)', '-' if pd.isna(summary.get('Expectancy_R')) else f"{summary.get('Expectancy_R'):.2f}")
 
         c1, c2 = st.columns([1.4, 1])
         with c1:
@@ -395,6 +395,29 @@ if run_btn:
             eq = equity_df['Equity']
             dd = (eq/eq.cummax() - 1).rename('Drawdown')
             st.plotly_chart(px.area(dd.reset_index(), x='Date', y='Drawdown', title='Drawdown'), use_container_width=True)
+
+        st.subheader('Downloads')
+        st.download_button(
+            'Download trades.csv',
+            data=trades_df.to_csv(index=False).encode('utf-8'),
+            file_name='trades.csv',
+            mime='text/csv',
+        )
+        st.download_button(
+            'Download equity.csv',
+            data=equity_df.reset_index().to_csv(index=False).encode('utf-8'),
+            file_name='equity.csv',
+            mime='text/csv',
+        )
+
+        st.subheader('Breakdown')
+        b1, b2 = st.columns(2)
+        with b1:
+            st.caption('By setup')
+            st.dataframe(breakdown.get('by_setup', pd.DataFrame()), use_container_width=True)
+        with b2:
+            st.caption('By reason')
+            st.dataframe(breakdown.get('by_reason', pd.DataFrame()), use_container_width=True)
 
         st.subheader('Trades')
         st.dataframe(trades_df, use_container_width=True)
