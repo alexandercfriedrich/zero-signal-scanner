@@ -6,11 +6,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import yfinance as yf
 
-from backtest_engine import run_backtest, rsi
+from backtest_engine import run_backtest, run_short_backtest, rsi
 
 st.set_page_config(page_title='3S- Stock Signal Scanner by AF', layout='wide')
 
@@ -19,6 +21,314 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 _TODAY = datetime.date.today().isoformat()
 
+# ---------------------------------------------------------------------------
+# Color palette
+# ---------------------------------------------------------------------------
+GOLD = '#F59E0B'
+EMERALD = '#10B981'
+RUBY = '#EF4444'
+SAPPHIRE = '#3B82F6'
+AMETHYST = '#8B5CF6'
+BG_DARK = '#0B0F14'
+BG_CARD = '#0F1621'
+TEXT_COLOR = '#E6EAF2'
+TEXT_DIM = '#8B95A5'
+
+# ---------------------------------------------------------------------------
+# Premium CSS injection
+# ---------------------------------------------------------------------------
+PREMIUM_CSS = """
+<style>
+/* --- Global overrides --- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Dark gradient background */
+.stApp {
+    background: linear-gradient(135deg, #070A0E 0%, #0B0F14 40%, #0D1117 100%) !important;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0B0F14; }
+::-webkit-scrollbar-thumb { background: #2A3040; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #F59E0B; }
+
+/* --- Header styling --- */
+.premium-header {
+    text-align: center;
+    padding: 1.5rem 0 1rem 0;
+    margin-bottom: 1rem;
+    background: linear-gradient(135deg, rgba(15,22,33,0.9) 0%, rgba(11,15,20,0.9) 100%);
+    border-bottom: 1px solid rgba(245,158,11,0.15);
+    border-radius: 0 0 16px 16px;
+}
+.premium-header h1 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #F59E0B, #FBBF24, #F59E0B);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin: 0 0 0.3rem 0;
+    letter-spacing: -0.5px;
+}
+.premium-header p {
+    color: #8B95A5;
+    font-size: 0.9rem;
+    margin: 0;
+    font-weight: 300;
+}
+
+/* --- Glass-morphism metric cards --- */
+.metric-row {
+    display: flex;
+    gap: 12px;
+    margin: 12px 0;
+    flex-wrap: wrap;
+}
+.metric-card {
+    flex: 1;
+    min-width: 140px;
+    background: linear-gradient(135deg, rgba(15,22,33,0.85) 0%, rgba(20,28,40,0.75) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(245,158,11,0.12);
+    border-radius: 12px;
+    padding: 16px 18px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+.metric-card:hover {
+    border-color: rgba(245,158,11,0.35);
+    box-shadow: 0 0 20px rgba(245,158,11,0.08);
+    transform: translateY(-2px);
+}
+.metric-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, rgba(245,158,11,0.4), transparent);
+}
+.metric-card .label {
+    font-size: 0.72rem;
+    color: #8B95A5;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 500;
+    margin-bottom: 6px;
+}
+.metric-card .value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+.metric-card .value.positive { color: #10B981; }
+.metric-card .value.negative { color: #EF4444; }
+.metric-card .value.neutral { color: #F59E0B; }
+.metric-card .icon {
+    position: absolute;
+    top: 12px; right: 14px;
+    font-size: 1.4rem;
+    opacity: 0.4;
+}
+
+/* --- Section headers with gradient underline --- */
+.section-header {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #E6EAF2;
+    margin: 2rem 0 1rem 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid transparent;
+    border-image: linear-gradient(90deg, #F59E0B, transparent) 1;
+}
+
+/* --- Animated gradient border panels --- */
+.glass-panel {
+    background: linear-gradient(135deg, rgba(15,22,33,0.8) 0%, rgba(20,28,40,0.7) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(245,158,11,0.10);
+    border-radius: 14px;
+    padding: 20px;
+    margin: 12px 0;
+    position: relative;
+    overflow: hidden;
+}
+.glass-panel::before {
+    content: '';
+    position: absolute;
+    top: -1px; left: -1px; right: -1px; bottom: -1px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, rgba(245,158,11,0.15), transparent, rgba(59,130,246,0.10));
+    z-index: -1;
+}
+
+/* --- Signal cards (expandable) --- */
+.signal-card {
+    background: linear-gradient(135deg, rgba(15,22,33,0.85) 0%, rgba(20,28,40,0.75) 100%);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(245,158,11,0.08);
+    border-radius: 12px;
+    padding: 16px;
+    margin: 8px 0;
+    transition: all 0.3s ease;
+}
+.signal-card:hover {
+    border-color: rgba(245,158,11,0.25);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+}
+.signal-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.badge-long { background: rgba(16,185,129,0.15); color: #10B981; border: 1px solid rgba(16,185,129,0.3); }
+.badge-short { background: rgba(239,68,68,0.15); color: #EF4444; border: 1px solid rgba(239,68,68,0.3); }
+.badge-neutral { background: rgba(245,158,11,0.15); color: #F59E0B; border: 1px solid rgba(245,158,11,0.3); }
+
+/* --- Data table styling --- */
+.stDataFrame > div > div > div > div > div > table {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+.stDataFrame thead th {
+    background: rgba(15,22,33,0.9) !important;
+    color: #F59E0B !important;
+    font-weight: 600 !important;
+    font-size: 0.78rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.5px !important;
+    border-bottom: 2px solid rgba(245,158,11,0.2) !important;
+}
+.stDataFrame tbody tr:hover td {
+    background: rgba(245,158,11,0.04) !important;
+}
+
+/* --- Streamlit tabs modernize --- */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0px;
+    background: rgba(15,22,33,0.5);
+    border-radius: 10px;
+    padding: 4px;
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px;
+    padding: 8px 20px;
+    font-weight: 500;
+    color: #8B95A5;
+    transition: all 0.3s;
+}
+.stTabs [aria-selected="true"] {
+    background: rgba(245,158,11,0.12) !important;
+    color: #F59E0B !important;
+    border-bottom-color: transparent !important;
+}
+
+/* --- Sidebar styling --- */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0B0F14 0%, #0D1218 100%) !important;
+    border-right: 1px solid rgba(245,158,11,0.08);
+}
+section[data-testid="stSidebar"] .stButton button {
+    background: linear-gradient(135deg, #F59E0B, #D97706) !important;
+    color: #0B0F14 !important;
+    font-weight: 600 !important;
+    border: none !important;
+    border-radius: 8px !important;
+    transition: all 0.3s !important;
+}
+section[data-testid="stSidebar"] .stButton button:hover {
+    box-shadow: 0 0 20px rgba(245,158,11,0.3) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* --- Download buttons --- */
+.stDownloadButton button {
+    background: transparent !important;
+    border: 1px solid rgba(245,158,11,0.3) !important;
+    color: #F59E0B !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    transition: all 0.3s !important;
+}
+.stDownloadButton button:hover {
+    background: rgba(245,158,11,0.08) !important;
+    border-color: #F59E0B !important;
+}
+
+/* --- Footer --- */
+.app-footer {
+    text-align: center;
+    padding: 1.5rem 0;
+    margin-top: 3rem;
+    border-top: 1px solid rgba(245,158,11,0.08);
+    color: #555;
+    font-size: 0.75rem;
+}
+
+/* Hide default Streamlit header */
+header[data-testid="stHeader"] {
+    background: transparent !important;
+}
+</style>
+"""
+
+st.markdown(PREMIUM_CSS, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Helper: Premium metric cards HTML
+# ---------------------------------------------------------------------------
+def render_metric_cards(metrics: list[dict]):
+    """Render a row of glass-morphism metric cards.
+    Each dict: {label, value, icon, css_class} where css_class in [positive, negative, neutral].
+    """
+    cards_html = '<div class="metric-row">'
+    for m in metrics:
+        css = m.get('css_class', 'neutral')
+        icon = m.get('icon', '')
+        cards_html += f'''
+        <div class="metric-card">
+            <div class="icon">{icon}</div>
+            <div class="label">{m['label']}</div>
+            <div class="value {css}">{m['value']}</div>
+        </div>'''
+    cards_html += '</div>'
+    st.markdown(cards_html, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Helper: Dark-themed Plotly layout
+# ---------------------------------------------------------------------------
+def apply_dark_layout(fig, title='', height=450):
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(11,15,20,0.6)',
+        title=dict(text=title, font=dict(size=16, color=TEXT_COLOR, family='Inter'),
+                   x=0.02, y=0.98),
+        font=dict(family='Inter', color=TEXT_DIM, size=11),
+        height=height,
+        margin=dict(l=50, r=20, t=50, b=40),
+        legend=dict(bgcolor='rgba(0,0,0,0)', font=dict(size=10)),
+        xaxis=dict(gridcolor='rgba(42,48,64,0.3)', zerolinecolor='rgba(42,48,64,0.3)'),
+        yaxis=dict(gridcolor='rgba(42,48,64,0.3)', zerolinecolor='rgba(42,48,64,0.3)'),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Default config
+# ---------------------------------------------------------------------------
 DEFAULT_CFG = {
   "start": "2021-01-01",
   "end": _TODAY,
@@ -124,15 +434,29 @@ def load_preset_cfg(preset_name: str) -> dict:
         return cfg
 
 
-st.title('3S- Stock Signal Scanner by AF')
+# ---------------------------------------------------------------------------
+# Premium header
+# ---------------------------------------------------------------------------
+st.markdown('''
+<div class="premium-header">
+    <h1>3S \u2013 Stock Signal Scanner</h1>
+    <p>Premium Swing-Trading Analyse \u2022 Signale \u2022 Backtesting &emsp; | &emsp; by AF</p>
+</div>
+''', unsafe_allow_html=True)
+
 st.markdown("""
-**Was macht dieser Scanner?**  
-Der 3S Stock Signal Scanner durchsucht t\u00e4glich Aktien aus verschiedenen Indizes nach technischen Signalen auf Tagesbasis.
+<div class="glass-panel">
+<strong>Was macht dieser Scanner?</strong><br>
+Der 3S Stock Signal Scanner durchsucht t\u00e4glich Aktien aus verschiedenen Indizes nach technischen Signalen auf Tagesbasis.<br><br>
+<span class="signal-badge badge-long">LONG</span> Daily Close-Breakout \u00fcber das 55-Tage-Hoch &emsp;
+<span class="signal-badge badge-short">SHORT</span> \u00dcberhitzte Aktien mit RSI > 75, Abstand zur EMA20 > 12\u00a0%, 5-Tage-Performance > 10\u00a0%, hohes Volumen
+</div>
+""", unsafe_allow_html=True)
 
-**Long-Signale:** Daily Close-Breakout \u00fcber das 55-Tage-Hoch  
-**Short-Signale:** \u00dcberhitzte Aktien mit RSI > 75, Abstand zur EMA20 > 12\u00a0%, 5-Tage-Performance > 10\u00a0%, hohes Volumen
-""")
 
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
 with st.sidebar:
     st.header('Universe')
     universe_mode = st.radio(
@@ -229,9 +553,15 @@ with st.sidebar:
 | `short_vol_mult_min` | `1.0` | **Short-Scan**: Min. Vol-Ratio (Vol / VolSMA50) |
 """)
 
+    st.markdown("---")
+    force_refresh = st.checkbox('\u267b\ufe0f Force Refresh (Cache ignorieren)', value=False,
+                                help='Alle gecachten Daten neu herunterladen')
     run_btn = st.button('Start', type='primary')
 
 
+# ---------------------------------------------------------------------------
+# Universe loaders
+# ---------------------------------------------------------------------------
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def load_sp500_symbols() -> list[str]:
     wiki_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -340,6 +670,9 @@ def load_sp500_sector_map() -> dict:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Resolver
+# ---------------------------------------------------------------------------
 def yahoo_search(query: str, region: str, lang: str):
     url = 'https://query2.finance.yahoo.com/v1/finance/search'
     params = {'q': query, 'quotesCount': 6, 'newsCount': 0, 'listsCount': 0,
@@ -417,9 +750,29 @@ def resolve_inputs(lines: list[str], regions: list[str]):
     return sorted(list(dict.fromkeys(resolved))), pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# Smart caching
+# ---------------------------------------------------------------------------
 def cache_path(sym: str, kind: str) -> Path:
     safe = sym.replace('^', '_').replace('/', '_')
     return CACHE_DIR / f'{safe}.{kind}.parquet'
+
+
+def _cache_is_fresh(p: Path, start: str) -> bool:
+    """Check if cache is fresh enough: data must cover start and be from today or yesterday."""
+    if not p.exists():
+        return False
+    try:
+        d = pd.read_parquet(p)
+        d['Date'] = pd.to_datetime(d['Date'])
+        cache_end = d['Date'].max()
+        today_ts = pd.Timestamp(_TODAY)
+        # Cache is fresh if it includes data from today or the previous trading day (1 day buffer)
+        if d['Date'].min() <= pd.Timestamp(start) and cache_end >= today_ts - pd.Timedelta(days=1):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def fetch_yf(symbols, start=None, end=None, interval='1d', period=None):
@@ -448,22 +801,19 @@ def unpack_download(df, batch):
     return out
 
 
-def load_daily(symbols: list[str], start: str, end: str, progress_cb=None) -> dict[str, pd.DataFrame]:
+def load_daily(symbols: list[str], start: str, end: str,
+               progress_cb=None, force=False) -> dict[str, pd.DataFrame]:
     out = {}
     need = []
-    # For scan modes: always force re-download if cached data ends > 1 day ago
-    today_ts = pd.Timestamp(_TODAY)
+
     for s in symbols:
         p = cache_path(s, '1d')
-        if p.exists():
+        if not force and _cache_is_fresh(p, start):
             try:
                 d = pd.read_parquet(p)
                 d['Date'] = pd.to_datetime(d['Date'])
-                cache_end = d['Date'].max()
-                if (d['Date'].min() <= pd.Timestamp(start)
-                        and cache_end >= today_ts - pd.Timedelta(days=3)):
-                    out[s] = d
-                    continue
+                out[s] = d
+                continue
             except Exception:
                 pass
         need.append(s)
@@ -600,6 +950,401 @@ def run_short_scan(daily: dict, cfg: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Signal chart builder (candlestick + RSI + Volume + TP zones)
+# ---------------------------------------------------------------------------
+def build_signal_chart(daily_df: pd.DataFrame, sym: str, signal_row: dict,
+                       side: str = 'SHORT', n_bars: int = 60) -> go.Figure:
+    """Build a multi-subplot chart for a signal candidate."""
+    df = daily_df.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').set_index('Date')
+    df = df.iloc[-n_bars:]
+
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    vol = df['Volume']
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    rsi_series = rsi(close, 14)
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.55, 0.22, 0.23],
+        subplot_titles=None,
+    )
+
+    # Candlestick
+    colors = [EMERALD if c >= o else RUBY
+              for o, c in zip(df['Open'], close)]
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['Open'], high=high, low=low, close=close,
+        increasing=dict(line=dict(color=EMERALD), fillcolor='rgba(16,185,129,0.3)'),
+        decreasing=dict(line=dict(color=RUBY), fillcolor='rgba(239,68,68,0.3)'),
+        name='Kurs', showlegend=False,
+    ), row=1, col=1)
+
+    # EMA20 overlay with glow
+    fig.add_trace(go.Scatter(
+        x=df.index, y=ema20, mode='lines',
+        line=dict(color='rgba(245,158,11,0.15)', width=6),
+        name='EMA20 glow', showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=ema20, mode='lines',
+        line=dict(color=GOLD, width=2),
+        name='EMA20',
+    ), row=1, col=1)
+
+    # TP zones and stop markers
+    if side == 'SHORT':
+        tp_ema20 = signal_row.get('tp_ema20')
+        tp_bl = signal_row.get('tp_breakout_level')
+        tp_fib = signal_row.get('tp_fib38')
+        stop = signal_row.get('short_stop')
+        entry = signal_row.get('price')
+
+        if entry:
+            fig.add_hline(y=entry, line=dict(color=AMETHYST, width=1.5, dash='dash'),
+                          annotation_text='Entry', annotation_font_color=AMETHYST,
+                          row=1, col=1)
+        if stop and not pd.isna(stop):
+            fig.add_hline(y=stop, line=dict(color=RUBY, width=1.5, dash='dash'),
+                          annotation_text='Stop-Loss', annotation_font_color=RUBY,
+                          row=1, col=1)
+        if tp_ema20 and not pd.isna(tp_ema20):
+            fig.add_hline(y=tp_ema20, line=dict(color=EMERALD, width=1, dash='dot'),
+                          annotation_text='TP: EMA20', annotation_font_color=EMERALD,
+                          row=1, col=1)
+        if tp_bl and not pd.isna(tp_bl):
+            fig.add_hline(y=tp_bl, line=dict(color=SAPPHIRE, width=1, dash='dot'),
+                          annotation_text='TP: Breakout', annotation_font_color=SAPPHIRE,
+                          row=1, col=1)
+        if tp_fib and not pd.isna(tp_fib):
+            fig.add_hline(y=tp_fib, line=dict(color=GOLD, width=1, dash='dot'),
+                          annotation_text='TP: Fib38%', annotation_font_color=GOLD,
+                          row=1, col=1)
+
+    # RSI subplot
+    fig.add_trace(go.Scatter(
+        x=df.index, y=rsi_series, mode='lines',
+        line=dict(color=AMETHYST, width=1.5),
+        name='RSI(14)',
+    ), row=2, col=1)
+    fig.add_hline(y=70, line=dict(color='rgba(239,68,68,0.4)', width=1, dash='dash'),
+                  row=2, col=1)
+    fig.add_hline(y=30, line=dict(color='rgba(16,185,129,0.4)', width=1, dash='dash'),
+                  row=2, col=1)
+    # RSI fill overbought zone
+    fig.add_hrect(y0=70, y1=100, fillcolor='rgba(239,68,68,0.05)', line_width=0,
+                  row=2, col=1)
+
+    # Volume bars
+    vol_colors = [EMERALD if c >= o else RUBY
+                  for o, c in zip(df['Open'], close)]
+    fig.add_trace(go.Bar(
+        x=df.index, y=vol, name='Volumen',
+        marker=dict(color=vol_colors, opacity=0.6),
+        showlegend=False,
+    ), row=3, col=1)
+
+    # Layout
+    fig.update_layout(
+        template='plotly_dark',
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(11,15,20,0.5)',
+        font=dict(family='Inter', color=TEXT_DIM, size=10),
+        height=500,
+        margin=dict(l=50, r=20, t=30, b=30),
+        legend=dict(bgcolor='rgba(0,0,0,0)', orientation='h', y=1.02,
+                    font=dict(size=9)),
+        xaxis3=dict(gridcolor='rgba(42,48,64,0.2)'),
+        yaxis=dict(gridcolor='rgba(42,48,64,0.2)', title='Kurs'),
+        yaxis2=dict(gridcolor='rgba(42,48,64,0.2)', title='RSI'),
+        yaxis3=dict(gridcolor='rgba(42,48,64,0.2)', title='Vol'),
+        xaxis_rangeslider_visible=False,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Backtest chart helpers
+# ---------------------------------------------------------------------------
+def build_equity_chart(equity_df: pd.DataFrame, title: str = 'Equity Curve') -> go.Figure:
+    eq = equity_df.reset_index()
+    fig = go.Figure()
+
+    # Gradient fill area
+    fig.add_trace(go.Scatter(
+        x=eq['Date'], y=eq['Equity'], mode='lines',
+        line=dict(color='rgba(245,158,11,0.1)', width=0),
+        fill='tozeroy', fillcolor='rgba(245,158,11,0.05)',
+        showlegend=False,
+    ))
+
+    # Glow line
+    fig.add_trace(go.Scatter(
+        x=eq['Date'], y=eq['Equity'], mode='lines',
+        line=dict(color='rgba(245,158,11,0.15)', width=5),
+        showlegend=False,
+    ))
+
+    # Main line
+    fig.add_trace(go.Scatter(
+        x=eq['Date'], y=eq['Equity'], mode='lines',
+        line=dict(color=GOLD, width=2),
+        name='Equity',
+    ))
+
+    apply_dark_layout(fig, title, height=380)
+    fig.update_yaxes(title='Kapital (\u20ac)')
+    return fig
+
+
+def build_drawdown_chart(equity_df: pd.DataFrame, title: str = 'Drawdown') -> go.Figure:
+    eq = equity_df['Equity']
+    dd = (eq / eq.cummax() - 1) * 100
+    dd_df = dd.reset_index()
+    dd_df.columns = ['Date', 'Drawdown']
+
+    fig = go.Figure()
+
+    # Fill
+    fig.add_trace(go.Scatter(
+        x=dd_df['Date'], y=dd_df['Drawdown'], mode='lines',
+        line=dict(color=RUBY, width=1.5),
+        fill='tozeroy', fillcolor='rgba(239,68,68,0.12)',
+        name='Drawdown',
+    ))
+
+    apply_dark_layout(fig, title, height=280)
+    fig.update_yaxes(title='Drawdown (%)')
+    return fig
+
+
+def build_monthly_returns_heatmap(equity_df: pd.DataFrame) -> go.Figure:
+    eq = equity_df['Equity'].copy()
+    eq.index = pd.to_datetime(eq.index)
+
+    monthly = eq.resample('ME').last()
+    monthly_ret = monthly.pct_change().dropna() * 100
+
+    years = monthly_ret.index.year.unique()
+    months = list(range(1, 13))
+    month_labels = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez']
+
+    z = []
+    for y in sorted(years):
+        row = []
+        for m in months:
+            vals = monthly_ret[(monthly_ret.index.year == y) & (monthly_ret.index.month == m)]
+            row.append(float(vals.iloc[0]) if len(vals) > 0 else np.nan)
+        z.append(row)
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=month_labels, y=[str(y) for y in sorted(years)],
+        colorscale=[
+            [0.0, RUBY],
+            [0.5, '#1a1a2e'],
+            [1.0, EMERALD],
+        ],
+        zmid=0,
+        text=[[f'{v:.1f}%' if not pd.isna(v) else '' for v in row] for row in z],
+        texttemplate='%{text}',
+        textfont=dict(size=10, color=TEXT_COLOR),
+        hoverongaps=False,
+        colorbar=dict(title='%', tickfont=dict(color=TEXT_DIM)),
+    ))
+
+    apply_dark_layout(fig, 'Monatliche Renditen (%)', height=max(200, len(years) * 35 + 80))
+    fig.update_xaxes(side='top')
+    return fig
+
+
+def build_trade_distribution(trades_df: pd.DataFrame) -> go.Figure:
+    if trades_df.empty:
+        fig = go.Figure()
+        apply_dark_layout(fig, 'Keine Trades', 250)
+        return fig
+
+    wins = len(trades_df[trades_df['pnl'] > 0])
+    losses = len(trades_df[trades_df['pnl'] < 0])
+    flat = len(trades_df[trades_df['pnl'] == 0])
+
+    labels = ['Gewinn', 'Verlust', 'Neutral']
+    values = [wins, losses, flat]
+    colors = [EMERALD, RUBY, GOLD]
+
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values,
+        hole=0.55,
+        marker=dict(colors=colors, line=dict(color=BG_DARK, width=2)),
+        textinfo='label+percent',
+        textfont=dict(size=11, color=TEXT_COLOR),
+    ))
+
+    apply_dark_layout(fig, 'Win/Loss Verteilung', height=300)
+    return fig
+
+
+def build_pnl_histogram(trades_df: pd.DataFrame) -> go.Figure:
+    if trades_df.empty:
+        fig = go.Figure()
+        apply_dark_layout(fig, 'Keine Trades', 250)
+        return fig
+
+    pnl = trades_df['pnl']
+    colors = [EMERALD if v > 0 else RUBY for v in pnl]
+
+    fig = go.Figure(go.Histogram(
+        x=pnl, nbinsx=30,
+        marker=dict(color=GOLD, opacity=0.7, line=dict(color=GOLD, width=0.5)),
+        name='PnL',
+    ))
+
+    apply_dark_layout(fig, 'PnL Verteilung', height=280)
+    fig.update_xaxes(title='PnL (\u20ac)')
+    fig.update_yaxes(title='Anzahl Trades')
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Helper: display backtest results
+# ---------------------------------------------------------------------------
+def display_backtest_results(equity_df, trades_df, summary, breakdown, label=''):
+    prefix = f'{label} ' if label else ''
+
+    # Metric cards row 1
+    cagr_v = summary.get('CAGR', 0)
+    maxdd_v = summary.get('MaxDrawdown', 0)
+    pf_v = summary.get('ProfitFactor', np.nan)
+    wr_v = summary.get('WinRate', np.nan)
+    exp_v = summary.get('Expectancy_R', np.nan)
+
+    row1 = [
+        {'label': f'{prefix}Endkapital', 'value': f"{summary['final_equity']:,.2f} \u20ac",
+         'icon': '\U0001f4b0', 'css_class': 'positive' if summary['final_equity'] > summary['initial_cash'] else 'negative'},
+        {'label': 'CAGR', 'value': f"{cagr_v * 100:.2f}%",
+         'icon': '\U0001f4c8', 'css_class': 'positive' if cagr_v > 0 else 'negative'},
+        {'label': 'Max. Drawdown', 'value': f"{maxdd_v * 100:.2f}%",
+         'icon': '\U0001f4c9', 'css_class': 'negative' if maxdd_v < -0.1 else 'neutral'},
+        {'label': 'Volatilit\u00e4t', 'value': f"{summary.get('Volatility', 0) * 100:.2f}%",
+         'icon': '\U0001f30a', 'css_class': 'neutral'},
+        {'label': 'Trades', 'value': str(summary.get('Trades', 0)),
+         'icon': '\U0001f4ca', 'css_class': 'neutral'},
+    ]
+    render_metric_cards(row1)
+
+    row2 = [
+        {'label': 'Profit Factor', 'value': f"{pf_v:.2f}" if np.isfinite(pf_v) else '-',
+         'icon': '\u2696\ufe0f', 'css_class': 'positive' if (np.isfinite(pf_v) and pf_v > 1) else 'negative'},
+        {'label': 'Win Rate', 'value': f"{wr_v * 100:.1f}%" if not pd.isna(wr_v) else '-',
+         'icon': '\U0001f3af', 'css_class': 'positive' if (not pd.isna(wr_v) and wr_v > 0.5) else 'negative'},
+        {'label': 'Avg Win', 'value': f"{summary.get('AvgWin', 0):.2f} \u20ac" if not pd.isna(summary.get('AvgWin')) else '-',
+         'icon': '\u2705', 'css_class': 'positive'},
+        {'label': 'Avg Loss', 'value': f"{summary.get('AvgLoss', 0):.2f} \u20ac" if not pd.isna(summary.get('AvgLoss')) else '-',
+         'icon': '\u274c', 'css_class': 'negative'},
+        {'label': 'Expectancy (R)', 'value': f"{exp_v:.2f}" if np.isfinite(exp_v) else '-',
+         'icon': '\U0001f52e', 'css_class': 'positive' if (np.isfinite(exp_v) and exp_v > 0) else 'negative'},
+    ]
+    render_metric_cards(row2)
+
+    with st.expander('\u2139\ufe0f Kennzahlen-Erkl\u00e4rung'):
+        st.markdown("""
+| Kennzahl | Erkl\u00e4rung |
+|---|---|
+| **Endkapital** | Gesamtkapital am Ende des Backtest-Zeitraums |
+| **CAGR** | J\u00e4hrliche Wachstumsrate |
+| **Max. Drawdown** | Gr\u00f6\u00dfter prozentualer R\u00fcckgang |
+| **Volatilit\u00e4t** | Annualisierte Standardabweichung der t\u00e4glichen Renditen |
+| **Trades** | Gesamtanzahl abgeschlossener Trades |
+| **Profit Factor** | Gesamtgewinn / Gesamtverlust (>1 = profitabel) |
+| **Win Rate** | Anteil gewinnbringender Trades |
+| **Avg Win** | Durchschnittlicher Gewinn je Trade (\u20ac) |
+| **Avg Loss** | Durchschnittlicher Verlust je Trade (\u20ac) |
+| **Expectancy (R)** | Erwartungswert je Trade in R; >0 = positiv |
+""")
+
+    # Charts
+    if not equity_df.empty:
+        c1, c2 = st.columns([1.4, 1])
+        with c1:
+            st.plotly_chart(build_equity_chart(equity_df, f'{prefix}Equity Curve'),
+                            use_container_width=True)
+        with c2:
+            st.plotly_chart(build_drawdown_chart(equity_df, f'{prefix}Drawdown'),
+                            use_container_width=True)
+
+        c3, c4 = st.columns(2)
+        with c3:
+            st.plotly_chart(build_monthly_returns_heatmap(equity_df),
+                            use_container_width=True)
+        with c4:
+            if not trades_df.empty:
+                c4a, c4b = st.columns(2)
+                with c4a:
+                    st.plotly_chart(build_trade_distribution(trades_df),
+                                   use_container_width=True)
+                with c4b:
+                    st.plotly_chart(build_pnl_histogram(trades_df),
+                                   use_container_width=True)
+
+    # Downloads
+    st.markdown(f'<div class="section-header">{prefix}Downloads</div>', unsafe_allow_html=True)
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.download_button(f'\u2b07 Download {prefix.strip().lower() or ""}trades.csv',
+                           data=trades_df.to_csv(index=False).encode('utf-8'),
+                           file_name=f'{prefix.strip().lower()}_trades.csv' if prefix else 'trades.csv',
+                           mime='text/csv')
+    with dc2:
+        st.download_button(f'\u2b07 Download {prefix.strip().lower() or ""}equity.csv',
+                           data=equity_df.reset_index().to_csv(index=False).encode('utf-8'),
+                           file_name=f'{prefix.strip().lower()}_equity.csv' if prefix else 'equity.csv',
+                           mime='text/csv')
+
+    # Breakdown
+    st.markdown(f'<div class="section-header">{prefix}Breakdown</div>', unsafe_allow_html=True)
+    b1, b2 = st.columns(2)
+    breakdown_col_cfg = {
+        'setup': st.column_config.TextColumn('Setup'),
+        'reason': st.column_config.TextColumn('Grund'),
+        'Trades': st.column_config.NumberColumn('Trades'),
+        'WinRate': st.column_config.NumberColumn('Win Rate', format='%.1f%%'),
+        'ProfitFactor': st.column_config.NumberColumn('Profit Factor', format='%.2f'),
+        'AvgPnL': st.column_config.NumberColumn('\u00d8 PnL', format='%.2f'),
+        'AvgR': st.column_config.NumberColumn('\u00d8 R', format='%.2f'),
+    }
+    with b1:
+        st.caption('Nach Setup')
+        st.dataframe(breakdown.get('by_setup', pd.DataFrame()),
+                     column_config=breakdown_col_cfg, use_container_width=True)
+    with b2:
+        st.caption('Nach Exit-Grund')
+        st.dataframe(breakdown.get('by_reason', pd.DataFrame()),
+                     column_config=breakdown_col_cfg, use_container_width=True)
+
+    # Trades table
+    st.markdown(f'<div class="section-header">{prefix}Trades</div>', unsafe_allow_html=True)
+    trades_col_cfg = {
+        'symbol': st.column_config.TextColumn('Symbol'),
+        'side': st.column_config.TextColumn('Richtung'),
+        'entry_date': st.column_config.TextColumn('Einstieg'),
+        'entry_px': st.column_config.NumberColumn('Einstiegskurs', format='%.2f'),
+        'exit_date': st.column_config.TextColumn('Ausstieg'),
+        'exit_px': st.column_config.NumberColumn('Ausstiegskurs', format='%.2f'),
+        'shares': st.column_config.NumberColumn('St\u00fcck'),
+        'pnl': st.column_config.NumberColumn('PnL (\u20ac)', format='%.2f'),
+        'reason': st.column_config.TextColumn('Exitgrund'),
+        'setup': st.column_config.TextColumn('Setup'),
+        'initial_risk_per_share': st.column_config.NumberColumn('Init. Risiko/Aktie', format='%.2f'),
+        'R_multiple': st.column_config.NumberColumn('R-Vielfaches', format='%.2f'),
+    }
+    st.dataframe(trades_df, column_config=trades_col_cfg, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
 # Main app logic
 # ---------------------------------------------------------------------------
 if run_btn:
@@ -624,8 +1369,8 @@ if run_btn:
             lines = [x for x in custom_list.splitlines()]
             symbols, resolve_table = resolve_inputs(lines, prefer_regions)
 
-    st.subheader('Symbol\u2011Aufl\u00f6sung')
-    st.dataframe(resolve_table, use_container_width=True)
+    with st.expander('Symbol\u2011Aufl\u00f6sung', expanded=False):
+        st.dataframe(resolve_table, use_container_width=True)
 
     cfg = dict(cfg)
     cfg['symbols'] = [s for s in symbols
@@ -655,10 +1400,14 @@ if run_btn:
     if action == 'Backtest (Daily)':
         ui_status.caption('Daily Daten laden...')
         daily = load_daily(needed_daily, cfg['start'], cfg['end'],
-                           progress_cb=lambda d, t, m: prog_step(d, t, m))
+                           progress_cb=lambda d, t, m: prog_step(d, t, m),
+                           force=force_refresh)
         cfg['symbols'] = [s for s in cfg['symbols'] if s in daily]
 
-        ui_status.caption('Backtest l\u00e4uft...')
+        # --- LONG BACKTEST ---
+        st.markdown('<div class="section-header">\U0001f4c8 Long Backtest</div>',
+                    unsafe_allow_html=True)
+        ui_status.caption('Long Backtest l\u00e4uft...')
         bt_prog = st.progress(0.0)
         bt_status = st.empty()
 
@@ -668,95 +1417,34 @@ if run_btn:
             if isinstance(date_or_msg, str):
                 bt_status.caption(date_or_msg)
             else:
-                bt_status.caption(f'Backtest: {done}/{total}  ({date_or_msg.date().isoformat()})')
+                bt_status.caption(f'Long Backtest: {done}/{total}  ({date_or_msg.date().isoformat()})')
 
         equity_df, trades_df, summary, breakdown = run_backtest(daily, cfg, progress_cb=bt_step)
-        bt_status.caption('Backtest: done')
+        bt_status.caption('Long Backtest: done')
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric('Endkapital', f"{summary['final_equity']:.2f}")
-        m2.metric('CAGR', f"{summary['CAGR'] * 100:.2f}%")
-        m3.metric('Max. Drawdown', f"{summary['MaxDrawdown'] * 100:.2f}%")
-        m4.metric('Volatilit\u00e4t', f"{summary['Volatility'] * 100:.2f}%")
-        m5.metric('Trades', str(summary['Trades']))
+        display_backtest_results(equity_df, trades_df, summary, breakdown, label='\U0001f4c8 Long')
 
-        m6, m7, m8, m9, m10 = st.columns(5)
-        m6.metric('Profit Factor', '-' if pd.isna(summary.get('ProfitFactor')) else f"{summary.get('ProfitFactor'):.2f}")
-        m7.metric('Win Rate', '-' if pd.isna(summary.get('WinRate')) else f"{summary.get('WinRate') * 100:.1f}%")
-        m8.metric('Avg Win', '-' if pd.isna(summary.get('AvgWin')) else f"{summary.get('AvgWin'):.2f}")
-        m9.metric('Avg Loss', '-' if pd.isna(summary.get('AvgLoss')) else f"{summary.get('AvgLoss'):.2f}")
-        m10.metric('Expectancy (R)', '-' if pd.isna(summary.get('Expectancy_R')) else f"{summary.get('Expectancy_R'):.2f}")
+        # --- SHORT BACKTEST ---
+        st.markdown('---')
+        st.markdown('<div class="section-header">\U0001f4c9 Short Backtest</div>',
+                    unsafe_allow_html=True)
+        ui_status.caption('Short Backtest l\u00e4uft...')
+        sbt_prog = st.progress(0.0)
+        sbt_status = st.empty()
 
-        with st.expander('\u2139\ufe0f Kennzahlen-Erkl\u00e4rung'):
-            st.markdown("""
-| Kennzahl | Erkl\u00e4rung |
-|---|---|
-| **Endkapital** | Gesamtkapital am Ende des Backtest-Zeitraums |
-| **CAGR** | J\u00e4hrliche Wachstumsrate |
-| **Max. Drawdown** | Gr\u00f6\u00dfter prozentualer R\u00fcckgang |
-| **Volatilit\u00e4t** | Annualisierte Standardabweichung der t\u00e4glichen Renditen |
-| **Trades** | Gesamtanzahl abgeschlossener Trades |
-| **Profit Factor** | Gesamtgewinn / Gesamtverlust (>1 = profitabel) |
-| **Win Rate** | Anteil gewinnbringender Trades |
-| **Avg Win** | Durchschnittlicher Gewinn je Trade (\u20ac) |
-| **Avg Loss** | Durchschnittlicher Verlust je Trade (\u20ac) |
-| **Expectancy (R)** | Erwartungswert je Trade in R; >0 = positiv |
-""")
+        def sbt_step(done, total, date_or_msg):
+            frac = 0.0 if total <= 0 else float(done) / float(total)
+            sbt_prog.progress(min(1.0, max(0.0, frac)))
+            if isinstance(date_or_msg, str):
+                sbt_status.caption(date_or_msg)
+            else:
+                sbt_status.caption(f'Short Backtest: {done}/{total}  ({date_or_msg.date().isoformat()})')
 
-        c1, c2 = st.columns([1.4, 1])
-        with c1:
-            st.plotly_chart(px.line(equity_df.reset_index(), x='Date', y='Equity', title='Equity Curve'),
-                            use_container_width=True)
-        with c2:
-            eq = equity_df['Equity']
-            dd = (eq / eq.cummax() - 1).rename('Drawdown')
-            st.plotly_chart(px.area(dd.reset_index(), x='Date', y='Drawdown', title='Drawdown'),
-                            use_container_width=True)
+        s_equity_df, s_trades_df, s_summary, s_breakdown = run_short_backtest(
+            daily, cfg, progress_cb=sbt_step)
+        sbt_status.caption('Short Backtest: done')
 
-        st.subheader('Downloads')
-        st.download_button('Download trades.csv',
-                           data=trades_df.to_csv(index=False).encode('utf-8'),
-                           file_name='trades.csv', mime='text/csv')
-        st.download_button('Download equity.csv',
-                           data=equity_df.reset_index().to_csv(index=False).encode('utf-8'),
-                           file_name='equity.csv', mime='text/csv')
-
-        st.subheader('Breakdown')
-        b1, b2 = st.columns(2)
-        breakdown_col_cfg = {
-            'setup': st.column_config.TextColumn('Setup'),
-            'reason': st.column_config.TextColumn('Grund'),
-            'Trades': st.column_config.NumberColumn('Trades'),
-            'WinRate': st.column_config.NumberColumn('Win Rate', format='%.1f%%'),
-            'ProfitFactor': st.column_config.NumberColumn('Profit Factor', format='%.2f'),
-            'AvgPnL': st.column_config.NumberColumn('\u00d8 PnL', format='%.2f'),
-            'AvgR': st.column_config.NumberColumn('\u00d8 R', format='%.2f'),
-        }
-        with b1:
-            st.caption('Nach Setup')
-            st.dataframe(breakdown.get('by_setup', pd.DataFrame()),
-                         column_config=breakdown_col_cfg, use_container_width=True)
-        with b2:
-            st.caption('Nach Exit-Grund')
-            st.dataframe(breakdown.get('by_reason', pd.DataFrame()),
-                         column_config=breakdown_col_cfg, use_container_width=True)
-
-        trades_col_cfg = {
-            'symbol': st.column_config.TextColumn('Symbol'),
-            'side': st.column_config.TextColumn('Richtung'),
-            'entry_date': st.column_config.TextColumn('Einstieg'),
-            'entry_px': st.column_config.NumberColumn('Einstiegskurs', format='%.2f'),
-            'exit_date': st.column_config.TextColumn('Ausstieg'),
-            'exit_px': st.column_config.NumberColumn('Ausstiegskurs', format='%.2f'),
-            'shares': st.column_config.NumberColumn('St\u00fcck'),
-            'pnl': st.column_config.NumberColumn('PnL (\u20ac)', format='%.2f'),
-            'reason': st.column_config.TextColumn('Exitgrund'),
-            'setup': st.column_config.TextColumn('Setup'),
-            'initial_risk_per_share': st.column_config.NumberColumn('Init. Risiko/Aktie', format='%.2f'),
-            'R_multiple': st.column_config.NumberColumn('R-Vielfaches', format='%.2f'),
-        }
-        st.subheader('Trades')
-        st.dataframe(trades_df, column_config=trades_col_cfg, use_container_width=True)
+        display_backtest_results(s_equity_df, s_trades_df, s_summary, s_breakdown, label='\U0001f4c9 Short')
 
     # -----------------------------------------------------------------------
     # DAILY LONG SIGNALSCAN
@@ -764,7 +1452,8 @@ if run_btn:
     elif action == 'Daily Long Signalscan':
         ui_status.caption('Daily Daten laden...')
         daily = load_daily(needed_daily, cfg['start'], cfg['end'],
-                           progress_cb=lambda d, t, m: prog_step(d, t, m))
+                           progress_cb=lambda d, t, m: prog_step(d, t, m),
+                           force=force_refresh)
 
         reg = daily[cfg['regime_symbol']].copy()
         reg['Date'] = pd.to_datetime(reg['Date'])
@@ -854,7 +1543,8 @@ if run_btn:
 
         ui_status.caption('Daily Long scan: done')
         regime_label = '\U0001f7e2 Risk-On' if risk_on else '\U0001f534 Risk-Off'
-        st.subheader(f'\U0001f4c8 Daily Long Signale ({regime_label})')
+        st.markdown(f'<div class="section-header">\U0001f4c8 Daily Long Signale ({regime_label})</div>',
+                    unsafe_allow_html=True)
         df_sig = pd.DataFrame(rows)
         if not df_sig.empty:
             df_sig['Entry-N\u00e4he \u2605'] = (10.0 / (1.0 + df_sig['breakout_strength'])).round(1)
@@ -863,6 +1553,18 @@ if run_btn:
             ).clip(upper=10.0).round(1)
             df_sig = df_sig.drop(columns=['breakout_strength']).sort_values(
                 'Follow-Through \u2605', ascending=False)
+
+            # Render signal summary metrics
+            render_metric_cards([
+                {'label': 'Signale gefunden', 'value': str(len(df_sig)), 'icon': '\U0001f4e1', 'css_class': 'neutral'},
+                {'label': 'Regime', 'value': 'Risk-On' if risk_on else 'Risk-Off',
+                 'icon': '\U0001f7e2' if risk_on else '\U0001f534',
+                 'css_class': 'positive' if risk_on else 'negative'},
+                {'label': 'Beste Entry-N\u00e4he', 'value': f"{df_sig['Entry-N\u00e4he \u2605'].max():.1f} \u2605",
+                 'icon': '\u2b50', 'css_class': 'positive'},
+                {'label': 'Bester Follow-Through', 'value': f"{df_sig['Follow-Through \u2605'].max():.1f} \u2605",
+                 'icon': '\U0001f680', 'css_class': 'positive'},
+            ])
 
             def _color_long(val):
                 ratio = min(1.0, float(val) / 10.0)
@@ -888,6 +1590,18 @@ if run_btn:
                 'Follow-Through \u2605': st.column_config.NumberColumn('Follow-Through \u2605', format='%.1f'),
             }
             st.dataframe(styled, column_config=long_col_cfg, use_container_width=True)
+
+            # Expandable charts per signal
+            st.markdown('<div class="section-header">Signal-Charts</div>', unsafe_allow_html=True)
+            for _, row in df_sig.head(10).iterrows():
+                sym = row['symbol']
+                if sym in daily:
+                    with st.expander(f"\U0001f4c8 {sym} \u2014 Kurs: {row['price']:.2f} | "
+                                     f"Entry-N\u00e4he: {row['Entry-N\u00e4he \u2605']:.1f}\u2605 | "
+                                     f"Follow-Through: {row['Follow-Through \u2605']:.1f}\u2605"):
+                        fig = build_signal_chart(daily[sym], sym, row.to_dict(), side='LONG')
+                        st.plotly_chart(fig, use_container_width=True)
+
             st.download_button('\u2b07 Download long_signals.csv',
                                data=df_sig.to_csv(index=False).encode('utf-8'),
                                file_name='long_signals.csv', mime='text/csv')
@@ -900,7 +1614,8 @@ if run_btn:
     elif action == 'Daily Short Signalscan':
         ui_status.caption('Daily Daten laden...')
         daily = load_daily(needed_daily, cfg['start'], cfg['end'],
-                           progress_cb=lambda d, t, m: prog_step(d, t, m))
+                           progress_cb=lambda d, t, m: prog_step(d, t, m),
+                           force=force_refresh)
 
         reg = daily[cfg['regime_symbol']].copy()
         reg['Date'] = pd.to_datetime(reg['Date'])
@@ -912,20 +1627,36 @@ if run_btn:
         df_short = run_short_scan(daily, cfg)
         ui_status.caption('Daily Short scan: done')
 
-        st.subheader(f'\U0001f4c9 Daily Short Signale (Regime: {regime_label} \u2013 Short-Scan unabh\u00e4ngig vom Regime)')
-        st.info(
-            '\U0001f6d1 **Short-Kandidaten**: \u00dcberhitzte Aktien mit RSI > {rsi}, '
-            'EMA20-Abstand > {ema}\u00a0%, 5d-Perf > {p5}\u00a0%, Vol-Ratio > {vm}x. '
-            'Sortiert nach **\u00dcberhitzungs-Score** (h\u00f6her = heißer). '
-            'TP-Zonen: EMA20, letztes Breakout-Level, Fib 38\u00a0%.'.format(
-                rsi=int(cfg.get('short_rsi_min', 75)),
-                ema=int(float(cfg.get('short_ema20_dist_min', 0.12)) * 100),
-                p5=int(float(cfg.get('short_5d_perf_min', 0.10)) * 100),
-                vm=cfg.get('short_vol_mult_min', 1.0),
-            )
+        st.markdown(f'<div class="section-header">\U0001f4c9 Daily Short Signale '
+                    f'(Regime: {regime_label} \u2013 Short-Scan unabh\u00e4ngig vom Regime)</div>',
+                    unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="glass-panel">'
+            '\U0001f6d1 <strong>Short-Kandidaten</strong>: \u00dcberhitzte Aktien mit '
+            f'RSI > {int(cfg.get("short_rsi_min", 75))}, '
+            f'EMA20-Abstand > {int(float(cfg.get("short_ema20_dist_min", 0.12)) * 100)}\u00a0%, '
+            f'5d-Perf > {int(float(cfg.get("short_5d_perf_min", 0.10)) * 100)}\u00a0%, '
+            f'Vol-Ratio > {cfg.get("short_vol_mult_min", 1.0)}x. '
+            'Sortiert nach <strong>\u00dcberhitzungs-Score</strong> (h\u00f6her = hei\u00dfer). '
+            'TP-Zonen: EMA20, letztes Breakout-Level, Fib 38\u00a0%.'
+            '</div>',
+            unsafe_allow_html=True,
         )
 
         if not df_short.empty:
+            # Summary metric cards
+            render_metric_cards([
+                {'label': 'Short-Signale', 'value': str(len(df_short)), 'icon': '\U0001f525', 'css_class': 'negative'},
+                {'label': 'Regime', 'value': 'Risk-On' if risk_on else 'Risk-Off',
+                 'icon': '\U0001f7e2' if risk_on else '\U0001f534',
+                 'css_class': 'positive' if risk_on else 'negative'},
+                {'label': 'Max \u00dcberhitzung', 'value': f"{df_short['ueberhitzung_score'].max():.1f} \u2605",
+                 'icon': '\U0001f321\ufe0f', 'css_class': 'negative'},
+                {'label': 'Avg RSI', 'value': f"{df_short['rsi'].mean():.1f}",
+                 'icon': '\U0001f4ca', 'css_class': 'neutral'},
+            ])
+
             def _color_short(val):
                 ratio = min(1.0, float(val) / 10.0)
                 r = int(200 * ratio)
@@ -961,8 +1692,45 @@ if run_btn:
                     help='Score 0\u201310: je h\u00f6her, desto \u00fcberhitzter \u2013 besser f\u00fcr Short-Einstieg'),
             }
             st.dataframe(styled_short, column_config=short_col_cfg, use_container_width=True)
+
+            # Expandable signal charts
+            st.markdown('<div class="section-header">Signal-Charts</div>', unsafe_allow_html=True)
+            for _, row in df_short.head(10).iterrows():
+                sym = row['symbol']
+                if sym in daily:
+                    with st.expander(f"\U0001f525 {sym} \u2014 Kurs: {row['price']:.2f} | "
+                                     f"RSI: {row['rsi']:.1f} | "
+                                     f"\u00dcberhitzung: {row['ueberhitzung_score']:.1f}\u2605"):
+                        fig = build_signal_chart(daily[sym], sym, row.to_dict(), side='SHORT')
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Inline metrics as badges
+                        st.markdown(f'''
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+                            <span class="signal-badge badge-short">RSI: {row["rsi"]:.1f}</span>
+                            <span class="signal-badge badge-short">EMA20-Dist: {row["ema20_dist_%"]:.1f}%</span>
+                            <span class="signal-badge badge-short">5d-Perf: {row["5d_perf_%"]:.1f}%</span>
+                            <span class="signal-badge badge-neutral">Vol: {row["vol_ratio"]:.2f}x</span>
+                            <span class="signal-badge badge-neutral">Stop: {row["short_stop"]:.2f}</span>
+                            <span class="signal-badge badge-long">TP EMA20: {row["tp_ema20"]:.2f}</span>
+                            <span class="signal-badge badge-long">TP BL: {row["tp_breakout_level"]:.2f}</span>
+                            <span class="signal-badge badge-long">TP Fib38: {row["tp_fib38"]:.2f}</span>
+                        </div>
+                        ''', unsafe_allow_html=True)
+
             st.download_button('\u2b07 Download short_signals.csv',
                                data=df_short.to_csv(index=False).encode('utf-8'),
                                file_name='short_signals.csv', mime='text/csv')
         else:
             st.info('Keine Short-Signale gefunden \u2013 aktuell erf\u00fcllt keine Aktie alle Filter.')
+
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+st.markdown(f'''
+<div class="app-footer">
+    3S \u2013 Stock Signal Scanner by AF &emsp;|&emsp;
+    Letzte Aktualisierung: {_TODAY} &emsp;|&emsp;
+    Daten: Yahoo Finance
+</div>
+''', unsafe_allow_html=True)

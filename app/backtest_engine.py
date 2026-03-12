@@ -652,3 +652,323 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     breakdown = breakdown_tables(trades_df)
 
     return equity_df, trades_df, summary, breakdown
+
+
+def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
+    """Backtest short strategy: sell overbought stocks, cover at TP or stop."""
+    symbols = cfg['symbols']
+    regime_symbol = cfg['regime_symbol']
+
+    data = {s: normalize_ohlcv(df) for s, df in data.items()}
+
+    needed = set(symbols + [regime_symbol])
+    missing = sorted([s for s in needed if s not in data])
+    if missing:
+        raise ValueError(f"Missing symbols in loaded data: {missing}")
+
+    start = pd.Timestamp(cfg['start'])
+    end = pd.Timestamp(cfg['end'])
+    idx = data[regime_symbol].index
+    idx = idx[(idx >= start) & (idx <= end)]
+
+    # Short-scan parameters
+    rsi_min = float(cfg.get('short_rsi_min', 75))
+    ema_dist_min = float(cfg.get('short_ema20_dist_min', 0.12))
+    perf5_min = float(cfg.get('short_5d_perf_min', 0.10))
+    vol_mult_min = float(cfg.get('short_vol_mult_min', 1.0))
+    atr_period = int(cfg.get('atr_period', 14))
+    bl_lookback = int(cfg.get('breakout_lookback', 55))
+    bl_src = cfg.get('breakout_level_source', 'close')
+    max_holding = int(cfg.get('max_holding_days', 30))
+    spread = cfg.get('spread_bps_per_side', 8) / 10_000.0
+    max_positions = int(cfg.get('max_positions', 5))
+    risk_per_trade = float(cfg.get('risk_per_trade', 0.01))
+
+    # Compute indicators for all symbols
+    needed_list = sorted(list(needed))
+    total_syms = len(needed_list)
+    for j, s in enumerate(needed_list):
+        if progress_cb is not None:
+            progress_cb(j, total_syms, f'Short Indicators: {j}/{total_syms} ({s})')
+
+        df = data[s]
+        if not df.index.equals(idx):
+            df = df.reindex(idx)
+            data[s] = df
+
+        df['ATR'] = atr(df, atr_period)
+        df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
+        df['RSI14'] = rsi(df['Close'], 14)
+        df['VolSMA50'] = sma(df['Volume'], 50)
+        df['Perf5'] = df['Close'] / df['Close'].shift(5) - 1
+        df['HH20'] = df['High'].rolling(20).max()
+        if bl_src == 'high':
+            df['BL'] = df['High'].shift(1).rolling(bl_lookback).max()
+        else:
+            df['BL'] = df['Close'].shift(1).rolling(bl_lookback).max()
+
+    if progress_cb is not None:
+        progress_cb(total_syms, total_syms, 'Short Indicators: done')
+
+    cash = float(cfg['initial_cash'])
+    equity_rows = []
+    open_positions = []
+    trades = []
+    n = len(idx)
+
+    def mark_to_market_short(date):
+        eq = cash
+        for p in open_positions:
+            px = data[p['symbol']].loc[date, 'Close']
+            if pd.isna(px):
+                continue
+            # Short P&L: entry_px - current_px (per share)
+            eq += p['shares'] * (p['entry_px'] - float(px))
+        return float(eq)
+
+    for i, date in enumerate(idx):
+        if progress_cb is not None and (i % 5 == 0 or i == n - 1):
+            progress_cb(i + 1, n, date)
+
+        # --- Check exits for open short positions ---
+        new_open = []
+        for p in open_positions:
+            df = data[p['symbol']]
+            h = df.loc[date, 'High']
+            l = df.loc[date, 'Low']
+            c = df.loc[date, 'Close']
+            if pd.isna(h) or pd.isna(l) or pd.isna(c):
+                new_open.append(p)
+                continue
+
+            h_v = float(h)
+            l_v = float(l)
+            c_v = float(c)
+
+            exit_px = None
+            reason = None
+
+            # Stop-loss: price goes above stop
+            if h_v >= p['stop']:
+                exit_px = p['stop']
+                reason = 'STOP'
+            else:
+                # Check TP zones (lowest TP first = best for short)
+                tp_levels = sorted([
+                    ('TP_EMA20', p.get('tp_ema20')),
+                    ('TP_BL', p.get('tp_bl')),
+                    ('TP_FIB38', p.get('tp_fib38')),
+                ], key=lambda x: x[1] if x[1] is not None and np.isfinite(x[1]) else 1e18)
+
+                for tp_name, tp_val in tp_levels:
+                    if tp_val is not None and np.isfinite(tp_val) and l_v <= tp_val:
+                        exit_px = tp_val
+                        reason = tp_name
+                        break
+
+            # Time-based exit
+            if exit_px is None and (date - p['entry_date']).days >= max_holding:
+                exit_px = c_v
+                reason = 'TIME'
+
+            if exit_px is None:
+                new_open.append(p)
+                continue
+
+            # Short cover: buy to close
+            exit_px_eff = exit_px * (1 + spread)
+            pnl = (p['entry_px'] - exit_px_eff) * p['shares']
+            cash += p['shares'] * p['entry_px']  # return collateral
+            cash -= p['shares'] * exit_px_eff     # buy to cover cost
+            # net effect = pnl added to cash
+
+            initial_risk = float(p.get('initial_risk_per_share', np.nan))
+            r_mult = np.nan
+            if np.isfinite(initial_risk) and initial_risk > 0:
+                r_mult = (p['entry_px'] - exit_px_eff) / initial_risk
+
+            trades.append({
+                'symbol': p['symbol'],
+                'side': 'SHORT',
+                'entry_date': p['entry_date'].date().isoformat(),
+                'entry_px': p['entry_px'],
+                'exit_date': date.date().isoformat(),
+                'exit_px': exit_px_eff,
+                'shares': p['shares'],
+                'pnl': pnl,
+                'reason': reason,
+                'setup': 'SHORT_OVERHEAT',
+                'initial_risk_per_share': initial_risk,
+                'R_multiple': r_mult,
+            })
+
+        open_positions = new_open
+
+        eq_today = mark_to_market_short(date)
+        equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash,
+                            'OpenPositions': len(open_positions)})
+
+        # --- Look for new short entries ---
+        if i >= n - 1:
+            continue
+        next_date = idx[i + 1]
+
+        if len(open_positions) >= max_positions:
+            continue
+
+        candidates = []
+        held_syms = {p['symbol'] for p in open_positions}
+
+        for sym in symbols:
+            if sym in held_syms:
+                continue
+            df = data[sym]
+            row = df.loc[date]
+            if pd.isna(row.get('Close')) or pd.isna(row.get('ATR')):
+                continue
+            px = float(row['Close'])
+            if px <= 0 or pd.isna(row.get('RSI14')) or pd.isna(row.get('EMA20')):
+                continue
+
+            rsi_v = float(row['RSI14'])
+            ema20_v = float(row['EMA20'])
+            atr_v = float(row['ATR'])
+            if atr_v <= 0 or ema20_v <= 0:
+                continue
+
+            ema_dist = px / ema20_v - 1
+            perf5_v = float(row.get('Perf5', 0)) if not pd.isna(row.get('Perf5')) else 0.0
+
+            vol_v = float(row.get('Volume', 0)) if not pd.isna(row.get('Volume')) else 0.0
+            vsma50 = float(row.get('VolSMA50', 0)) if not pd.isna(row.get('VolSMA50')) else 0.0
+            vol_ratio = vol_v / vsma50 if vsma50 > 0 else 0.0
+
+            # Short entry filters
+            if rsi_v < rsi_min:
+                continue
+            if ema_dist < ema_dist_min:
+                continue
+            if perf5_v < perf5_min:
+                continue
+            if vol_ratio < vol_mult_min:
+                continue
+
+            # Overheat score for ranking
+            rsi_score = min(1.0, (rsi_v - rsi_min) / 25.0)
+            ema_score = min(1.0, ema_dist / 0.30)
+            perf_score = min(1.0, perf5_v / 0.30)
+            vol_score = min(1.0, (vol_ratio - 1.0) / 3.0)
+            score = rsi_score * 3 + ema_score * 3 + perf_score * 2 + vol_score * 2
+
+            # TP zones
+            tp_ema20 = ema20_v
+            bl_v = float(row.get('BL', np.nan)) if not pd.isna(row.get('BL')) else np.nan
+            tp_bl = bl_v
+
+            hh20 = float(row.get('HH20', np.nan)) if not pd.isna(row.get('HH20')) else np.nan
+            ll20 = float(df['Low'].iloc[max(0, i-19):i+1].min()) if i >= 1 else np.nan
+            if np.isfinite(hh20) and np.isfinite(ll20):
+                tp_fib38 = hh20 - 0.382 * (hh20 - ll20)
+            else:
+                tp_fib38 = np.nan
+
+            # Stop: above 20-bar high + 1 ATR
+            stop = (hh20 + atr_v) if np.isfinite(hh20) else (px + 2 * atr_v)
+
+            candidates.append((sym, score, {
+                'tp_ema20': tp_ema20,
+                'tp_bl': tp_bl,
+                'tp_fib38': tp_fib38,
+                'stop': stop,
+                'atr_v': atr_v,
+            }))
+
+        if not candidates:
+            continue
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        n_new = min(int(cfg.get('max_new_trades_per_day', 2)),
+                    max_positions - len(open_positions))
+        picks = candidates[:n_new]
+
+        for sym, _, info in picks:
+            o = data[sym].loc[next_date, 'Open']
+            if pd.isna(o):
+                continue
+            entry_px = float(o)
+            if not np.isfinite(entry_px) or entry_px <= 0:
+                continue
+
+            entry_px_eff = entry_px * (1 - spread)  # short sell proceeds
+            stop_v = info['stop']
+            initial_risk = stop_v - entry_px_eff
+
+            risk_eur = risk_per_trade * eq_today
+            shares = int(max(0, np.floor(risk_eur / max(1e-9, initial_risk))))
+            if shares <= 0:
+                continue
+
+            collateral = shares * entry_px_eff
+            if collateral > cash:
+                shares = int(np.floor(cash / entry_px_eff))
+                if shares <= 0:
+                    continue
+                collateral = shares * entry_px_eff
+
+            cash -= collateral  # lock collateral
+
+            open_positions.append({
+                'symbol': sym,
+                'side': 'SHORT',
+                'entry_date': next_date,
+                'entry_px': entry_px_eff,
+                'shares': shares,
+                'stop': stop_v,
+                'tp_ema20': info['tp_ema20'],
+                'tp_bl': info['tp_bl'],
+                'tp_fib38': info['tp_fib38'],
+                'setup': 'SHORT_OVERHEAT',
+                'initial_risk_per_share': initial_risk,
+            })
+
+    equity_df = pd.DataFrame(equity_rows).set_index('Date')
+    trades_df = pd.DataFrame(trades)
+
+    if equity_df.empty:
+        summary = {
+            'start': str(start.date()), 'end': str(end.date()),
+            'initial_cash': float(cfg['initial_cash']),
+            'final_equity': float(cfg['initial_cash']),
+            'CAGR': 0.0, 'Volatility': 0.0, 'Sharpe_approx': 0.0,
+            'MaxDrawdown': 0.0, 'Trades': 0,
+            'ProfitFactor': np.nan, 'WinRate': np.nan,
+            'AvgWin': np.nan, 'AvgLoss': np.nan, 'Expectancy_R': np.nan,
+        }
+        return equity_df, trades_df, summary, breakdown_tables(trades_df)
+
+    eq = equity_df['Equity']
+    ret = eq.pct_change().fillna(0)
+    n_days = max(1, len(eq) - 1)
+    cagr = (eq.iloc[-1] / eq.iloc[0]) ** (252 / n_days) - 1 if eq.iloc[0] > 0 else 0.0
+    vol = ret.std() * np.sqrt(252)
+    sharpe = (ret.mean() * 252) / (ret.std() * np.sqrt(252) + 1e-12)
+    dd = (eq / eq.cummax() - 1)
+    max_dd = dd.min()
+
+    stats = compute_trade_stats(trades_df)
+
+    summary = {
+        'start': str(eq.index.min().date()),
+        'end': str(eq.index.max().date()),
+        'initial_cash': float(cfg['initial_cash']),
+        'final_equity': float(eq.iloc[-1]),
+        'CAGR': float(cagr),
+        'Volatility': float(vol),
+        'Sharpe_approx': float(sharpe),
+        'MaxDrawdown': float(max_dd),
+        'Trades': int(len(trades_df)),
+        **stats,
+    }
+
+    breakdown = breakdown_tables(trades_df)
+    return equity_df, trades_df, summary, breakdown
