@@ -245,6 +245,10 @@ div[data-testid="stDataFrame"] td {
 div[data-testid="stDataFrame"] tr:hover td {
     background: rgba(245, 158, 11, 0.04) !important;
 }
+
+/* ── Comparison highlight ── */
+.metric-better { background: rgba(16,185,129,0.18) !important; border-radius: 6px; }
+.metric-worse  { background: rgba(239,68,68,0.12) !important; border-radius: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -391,7 +395,8 @@ PLOTLY_LAYOUT = dict(
 
 
 def _apply_dark_layout(fig, title='', height=420):
-    fig.update_layout(**PLOTLY_LAYOUT, title=dict(text=title, font=dict(size=15, color=GOLD)),
+    fig.update_layout(PLOTLY_LAYOUT)
+    fig.update_layout(title=dict(text=title, font=dict(size=15, color=GOLD)),
                       height=height)
     return fig
 
@@ -503,8 +508,8 @@ def make_short_signal_chart(sym, df_raw, tp_ema20, tp_bl, tp_fib38, short_stop, 
         opacity=0.6, name='Volumen', showlegend=False,
     ), row=3, col=1)
 
+    fig.update_layout(PLOTLY_LAYOUT)
     fig.update_layout(
-        **PLOTLY_LAYOUT,
         title=dict(text=f'{sym} – Short-Signal Detail', font=dict(size=14, color=GOLD)),
         height=520,
         xaxis_rangeslider_visible=False,
@@ -583,6 +588,451 @@ def make_trade_distribution(trades_df):
 
 
 # ---------------------------------------------------------------------------
+# Feature 1: Korrelationsmatrix-Heatmap
+# ---------------------------------------------------------------------------
+def make_correlation_heatmap(daily: dict, signal_symbols: list[str]):
+    """Pairwise Pearson correlation of 60-day daily returns for signal stocks."""
+    if len(signal_symbols) < 2:
+        return None
+    returns = {}
+    for sym in signal_symbols:
+        if sym not in daily:
+            continue
+        df = daily[sym].copy()
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date').set_index('Date')
+        close = df['Close'].dropna()
+        if len(close) >= 60:
+            returns[sym] = close.iloc[-60:].pct_change().dropna()
+    if len(returns) < 2:
+        return None
+    ret_df = pd.DataFrame(returns).dropna()
+    if len(ret_df) < 10:
+        return None
+    corr = ret_df.corr()
+    # Custom color scale: Emerald(low) -> Gold(mid) -> Ruby(high)
+    colorscale = [
+        [0.0, EMERALD], [0.4, EMERALD],
+        [0.4, GOLD], [0.7, GOLD],
+        [0.7, RUBY], [1.0, RUBY],
+    ]
+    fig = go.Figure(data=go.Heatmap(
+        z=corr.values,
+        x=corr.columns.tolist(),
+        y=corr.index.tolist(),
+        colorscale=colorscale,
+        zmin=0, zmax=1,
+        text=np.round(corr.values, 2),
+        texttemplate='%{text}',
+        textfont=dict(size=10, color=TEXT_LIGHT),
+        hovertemplate='%{x} / %{y}: %{z:.2f}<extra></extra>',
+        colorbar=dict(title='Korr.', tickfont=dict(color=TEXT_DIM)),
+    ))
+    _apply_dark_layout(fig, '', height=max(300, len(corr) * 40 + 100))
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Feature 2: Risk/Reward Gauge
+# ---------------------------------------------------------------------------
+def make_rr_gauge(rr_ratio: float):
+    """Compact Risk/Reward gauge indicator."""
+    display_val = min(5.0, max(0.0, rr_ratio))
+    fig = go.Figure(go.Indicator(
+        mode='gauge+number',
+        value=display_val,
+        number=dict(suffix='R', font=dict(size=20, color=TEXT_LIGHT)),
+        gauge=dict(
+            axis=dict(range=[0, 5], tickfont=dict(color=TEXT_DIM, size=9)),
+            bar=dict(color=GOLD),
+            bgcolor='rgba(15,22,33,0.4)',
+            borderwidth=0,
+            steps=[
+                dict(range=[0, 1], color='rgba(239,68,68,0.3)'),
+                dict(range=[1, 2], color='rgba(245,158,11,0.3)'),
+                dict(range=[2, 3], color='rgba(16,185,129,0.2)'),
+                dict(range=[3, 5], color='rgba(16,185,129,0.35)'),
+            ],
+        ),
+        title=dict(text='Risk/Reward', font=dict(size=12, color=TEXT_DIM)),
+    ))
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, sans-serif', color=TEXT_LIGHT),
+        height=160, width=200,
+        margin=dict(l=20, r=20, t=40, b=10),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: Sector Exposure Sunburst
+# ---------------------------------------------------------------------------
+def make_sector_sunburst(signal_symbols: list[str], daily: dict):
+    """Sunburst chart of sector exposure for signal stocks."""
+    SECTOR_COLORS = [GOLD, EMERALD, SAPPHIRE, AMETHYST, RUBY,
+                     '#EC4899', '#06B6D4', '#84CC16', '#F97316', '#6366F1']
+    sector_map = {}
+    for sym in signal_symbols:
+        if sym not in daily:
+            continue
+        try:
+            ticker = yf.Ticker(sym)
+            info = ticker.info
+            sector_map[sym] = info.get('sector', 'Unbekannt')
+        except Exception:
+            sector_map[sym] = 'Unbekannt'
+
+    if not sector_map:
+        return None
+
+    from collections import Counter
+    sector_counts = Counter(sector_map.values())
+    total = sum(sector_counts.values())
+
+    ids, labels, parents, values, colors = [], [], [], [], []
+    for i, (sector, count) in enumerate(sector_counts.most_common()):
+        ids.append(sector)
+        labels.append(f"{sector}\n({count})")
+        parents.append('')
+        values.append(count)
+        colors.append(SECTOR_COLORS[i % len(SECTOR_COLORS)])
+        for sym, sec in sector_map.items():
+            if sec == sector:
+                ids.append(f"{sector}-{sym}")
+                labels.append(sym)
+                parents.append(sector)
+                values.append(1)
+                colors.append(SECTOR_COLORS[i % len(SECTOR_COLORS)])
+
+    fig = go.Figure(go.Sunburst(
+        ids=ids, labels=labels, parents=parents, values=values,
+        marker=dict(colors=colors, line=dict(color=BG_DARK, width=1)),
+        branchvalues='total',
+        hovertemplate='<b>%{label}</b><br>Anzahl: %{value}<extra></extra>',
+        textfont=dict(size=11, color=TEXT_LIGHT),
+    ))
+    fig.update_layout(
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, sans-serif', color=TEXT_LIGHT),
+        height=450,
+        margin=dict(l=10, r=10, t=10, b=10),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: Regime-Timeline
+# ---------------------------------------------------------------------------
+def make_regime_timeline(daily: dict, cfg: dict, trades_df=None):
+    """SPY regime timeline with trade markers."""
+    regime_sym = cfg.get('regime_symbol', 'SPY')
+    if regime_sym not in daily:
+        return None
+    df = daily[regime_sym].copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').set_index('Date')
+    sma_n = int(cfg.get('sma_regime', 200))
+    df['SMA200'] = df['Close'].rolling(sma_n, min_periods=sma_n).mean()
+    df = df.dropna(subset=['SMA200'])
+    if df.empty:
+        return None
+
+    fig = go.Figure()
+    # Risk-On/Off background zones
+    risk_on = df['Close'] > df['SMA200']
+    zone_start = df.index[0]
+    current_state = bool(risk_on.iloc[0])
+    for i in range(1, len(df)):
+        new_state = bool(risk_on.iloc[i])
+        if new_state != current_state or i == len(df) - 1:
+            zone_end = df.index[i]
+            color = 'rgba(16,185,129,0.08)' if current_state else 'rgba(239,68,68,0.08)'
+            fig.add_vrect(x0=zone_start, x1=zone_end, fillcolor=color,
+                          layer='below', line_width=0)
+            zone_start = zone_end
+            current_state = new_state
+
+    # SPY price line
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['Close'], mode='lines',
+        line=dict(color=GOLD, width=1.5), name=regime_sym,
+    ))
+    # SMA200 line
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['SMA200'], mode='lines',
+        line=dict(color=TEXT_DIM, width=1, dash='dash'), name=f'SMA{sma_n}',
+    ))
+    # Trade markers
+    if trades_df is not None and not trades_df.empty:
+        for _, t in trades_df.iterrows():
+            entry_d = pd.Timestamp(t['entry_date'])
+            exit_d = pd.Timestamp(t['exit_date'])
+            side = t.get('side', 'LONG')
+            # Entry marker
+            if entry_d in df.index:
+                y_val = float(df.loc[entry_d, 'Close'])
+            else:
+                y_val = float(t['entry_px'])
+            fig.add_trace(go.Scatter(
+                x=[entry_d], y=[y_val], mode='markers',
+                marker=dict(
+                    symbol='triangle-up' if side == 'LONG' else 'triangle-down',
+                    size=8, color=EMERALD if side == 'LONG' else RUBY,
+                    line=dict(color='white', width=0.5),
+                ),
+                name=f'{side} Entry', showlegend=False,
+                hovertemplate=f'{t["symbol"]} {side} Entry<br>%{{x}}<extra></extra>',
+            ))
+            # Exit marker
+            if exit_d in df.index:
+                y_val_exit = float(df.loc[exit_d, 'Close'])
+            else:
+                y_val_exit = float(t['exit_px'])
+            fig.add_trace(go.Scatter(
+                x=[exit_d], y=[y_val_exit], mode='markers',
+                marker=dict(symbol='x', size=6, color=TEXT_DIM,
+                            line=dict(color=TEXT_DIM, width=1)),
+                name='Exit', showlegend=False,
+                hovertemplate=f'{t["symbol"]} Exit ({t.get("reason", "")})<br>%{{x}}<extra></extra>',
+            ))
+
+    _apply_dark_layout(fig, '', height=300)
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(orientation='h', y=1.05, x=0.5, xanchor='center',
+                    bgcolor='rgba(0,0,0,0)', font=dict(size=10, color=TEXT_DIM)),
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Feature 5: Performance-Attribution
+# ---------------------------------------------------------------------------
+def make_performance_attribution(trades_df, daily: dict, cfg: dict):
+    """Stacked bar charts: PnL by setup/regime, win rate, avg R."""
+    if trades_df is None or trades_df.empty:
+        return None, None, None
+
+    regime_sym = cfg.get('regime_symbol', 'SPY')
+    sma_n = int(cfg.get('sma_regime', 200))
+
+    # Determine regime at entry for each trade
+    reg_df = None
+    if regime_sym in daily:
+        reg_df = daily[regime_sym].copy()
+        reg_df['Date'] = pd.to_datetime(reg_df['Date'])
+        reg_df = reg_df.sort_values('Date').set_index('Date')
+        reg_df['SMA200'] = reg_df['Close'].rolling(sma_n, min_periods=sma_n).mean()
+
+    tdf = trades_df.copy()
+    regimes = []
+    for _, row in tdf.iterrows():
+        entry_d = pd.Timestamp(row['entry_date'])
+        if reg_df is not None and entry_d in reg_df.index:
+            sma_val = reg_df.loc[entry_d, 'SMA200']
+            close_val = reg_df.loc[entry_d, 'Close']
+            if not pd.isna(sma_val) and not pd.isna(close_val):
+                regimes.append('Risk-On' if close_val > sma_val else 'Risk-Off')
+            else:
+                regimes.append('Unbekannt')
+        else:
+            regimes.append('Unbekannt')
+    tdf['regime'] = regimes
+
+    setups = sorted(tdf['setup'].dropna().unique())
+    regime_vals = ['Risk-On', 'Risk-Off']
+
+    # Chart 1: Total PnL by setup (stacked by regime)
+    fig1 = go.Figure()
+    for regime, color in [('Risk-On', EMERALD), ('Risk-Off', RUBY)]:
+        pnl_vals = []
+        for setup in setups:
+            mask = (tdf['setup'] == setup) & (tdf['regime'] == regime)
+            pnl_vals.append(float(tdf.loc[mask, 'pnl'].sum()))
+        fig1.add_trace(go.Bar(
+            name=regime, x=setups, y=pnl_vals,
+            marker_color=color, opacity=0.85,
+        ))
+    fig1.update_layout(barmode='stack')
+    _apply_dark_layout(fig1, 'Gesamt-PnL nach Setup', height=350)
+
+    # Chart 2: Win rate by setup (grouped bars)
+    fig2 = go.Figure()
+    for regime, color in [('Risk-On', EMERALD), ('Risk-Off', RUBY)]:
+        wr_vals = []
+        for setup in setups:
+            mask = (tdf['setup'] == setup) & (tdf['regime'] == regime)
+            sub = tdf.loc[mask]
+            if len(sub) > 0:
+                wr_vals.append(float((sub['pnl'] > 0).sum() / len(sub)) * 100)
+            else:
+                wr_vals.append(0)
+        fig2.add_trace(go.Bar(
+            name=regime, x=setups, y=wr_vals,
+            marker_color=color, opacity=0.85,
+        ))
+    fig2.update_layout(barmode='group')
+    _apply_dark_layout(fig2, 'Win Rate nach Setup (%)', height=350)
+    fig2.update_yaxes(ticksuffix='%')
+
+    # Chart 3: Average R-multiple by setup
+    fig3 = None
+    if 'R_multiple' in tdf.columns:
+        fig3 = go.Figure()
+        avg_r = []
+        for setup in setups:
+            mask = tdf['setup'] == setup
+            val = tdf.loc[mask, 'R_multiple'].mean()
+            avg_r.append(float(val) if np.isfinite(val) else 0)
+        colors_r = [EMERALD if v >= 0 else RUBY for v in avg_r]
+        fig3.add_trace(go.Bar(
+            x=setups, y=avg_r,
+            marker_color=colors_r, opacity=0.85,
+            name='Ø R-Vielfaches',
+        ))
+        _apply_dark_layout(fig3, 'Ø R-Vielfaches nach Setup', height=350)
+
+    return fig1, fig2, fig3
+
+
+# ---------------------------------------------------------------------------
+# Feature 7: Monte-Carlo Simulation
+# ---------------------------------------------------------------------------
+def run_monte_carlo(trades_df, initial_cash: float, n_sims: int = 1000):
+    """Run Monte-Carlo permutation of trade sequence."""
+    if trades_df is None or trades_df.empty or len(trades_df) < 3:
+        return None
+    pnls = trades_df['pnl'].values.copy()
+    n_trades = len(pnls)
+    curves = np.zeros((n_sims, n_trades + 1))
+    curves[:, 0] = initial_cash
+    rng = np.random.default_rng(42)
+    for i in range(n_sims):
+        shuffled = rng.permutation(pnls)
+        curves[i, 1:] = initial_cash + np.cumsum(shuffled)
+
+    # Stats
+    final_eq = curves[:, -1]
+    n_days_approx = 252  # approximate for CAGR
+    cagrs = (final_eq / initial_cash) ** (252 / max(1, n_trades)) - 1
+
+    # Max drawdown per simulation
+    max_dds = np.zeros(n_sims)
+    for i in range(n_sims):
+        eq = curves[i]
+        peak = np.maximum.accumulate(eq)
+        dd = (eq - peak) / np.where(peak > 0, peak, 1)
+        max_dds[i] = dd.min()
+
+    stats = {
+        'median_cagr': float(np.median(cagrs)),
+        'p5_cagr': float(np.percentile(cagrs, 5)),
+        'p95_cagr': float(np.percentile(cagrs, 95)),
+        'median_maxdd': float(np.median(max_dds)),
+        'p5_maxdd': float(np.percentile(max_dds, 5)),
+        'p95_maxdd': float(np.percentile(max_dds, 95)),
+        'median_final': float(np.median(final_eq)),
+        'p5_final': float(np.percentile(final_eq, 5)),
+        'p95_final': float(np.percentile(final_eq, 95)),
+        'ruin_prob': float((max_dds < -0.5).sum() / n_sims * 100),
+    }
+
+    # Build figure
+    fig = go.Figure()
+    x = list(range(n_trades + 1))
+
+    # All curves as thin transparent lines (sample 200 for performance)
+    sample_idx = rng.choice(n_sims, size=min(200, n_sims), replace=False)
+    for idx in sample_idx:
+        fig.add_trace(go.Scatter(
+            x=x, y=curves[idx], mode='lines',
+            line=dict(color=GOLD, width=0.3), opacity=0.08,
+            showlegend=False, hoverinfo='skip',
+        ))
+
+    # Percentile bands
+    p5 = np.percentile(curves, 5, axis=0)
+    p95 = np.percentile(curves, 95, axis=0)
+    median = np.median(curves, axis=0)
+
+    fig.add_trace(go.Scatter(
+        x=x, y=p95, mode='lines',
+        line=dict(color=EMERALD, width=1, dash='dash'),
+        name='95. Perzentil', showlegend=True,
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=p5, mode='lines',
+        line=dict(color=RUBY, width=1, dash='dash'),
+        fill='tonexty', fillcolor='rgba(245,158,11,0.06)',
+        name='5. Perzentil', showlegend=True,
+    ))
+    fig.add_trace(go.Scatter(
+        x=x, y=median, mode='lines',
+        line=dict(color=GOLD, width=2.5),
+        name='Median', showlegend=True,
+    ))
+
+    _apply_dark_layout(fig, '', height=420)
+    fig.update_layout(
+        xaxis_title='Trade #',
+        yaxis_title='Equity (€)',
+        showlegend=True,
+        legend=dict(orientation='h', y=1.05, x=0.5, xanchor='center',
+                    bgcolor='rgba(0,0,0,0)', font=dict(size=10, color=TEXT_DIM)),
+    )
+    return fig, stats
+
+
+# ---------------------------------------------------------------------------
+# Feature 6: Watchlist persistence
+# ---------------------------------------------------------------------------
+WATCHLIST_PATH = Path.home() / '.zero_swing_watchlist.json'
+
+
+def load_watchlist() -> list[dict]:
+    if WATCHLIST_PATH.exists():
+        try:
+            return json.loads(WATCHLIST_PATH.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def save_watchlist(wl: list[dict]):
+    WATCHLIST_PATH.write_text(json.dumps(wl, indent=2, default=str))
+
+
+def add_to_watchlist(entry: dict):
+    wl = load_watchlist()
+    # Avoid duplicates by symbol+side
+    for existing in wl:
+        if existing['symbol'] == entry['symbol'] and existing['side'] == entry['side']:
+            return
+    wl.append(entry)
+    save_watchlist(wl)
+
+
+def remove_from_watchlist(symbol: str, side: str):
+    wl = load_watchlist()
+    wl = [e for e in wl if not (e['symbol'] == symbol and e['side'] == side)]
+    save_watchlist(wl)
+
+
+def send_telegram_alert(token: str, chat_id: str, message: str) -> bool:
+    """Send a Telegram notification."""
+    try:
+        url = f'https://api.telegram.org/bot{token}/sendMessage'
+        resp = requests.post(url, json={'chat_id': chat_id, 'text': message,
+                                         'parse_mode': 'HTML'}, timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Smart caching: trading-day-aware freshness
 # ---------------------------------------------------------------------------
 def _is_cache_fresh(cache_end_ts: pd.Timestamp) -> bool:
@@ -638,7 +1088,8 @@ with st.sidebar:
     st.header('Aktion')
     action = st.radio(
         'Modus',
-        ['Daily Long Signalscan', 'Daily Short Signalscan', 'Backtest (Daily)'],
+        ['Daily Long Signalscan', 'Daily Short Signalscan', 'Backtest (Daily)',
+         '📋 Watchlist', '⚖️ Vergleich'],
         index=0,
     )
 
@@ -1296,6 +1747,13 @@ if run_btn:
                            progress_cb=lambda d, t, m: prog_step(d, t, m))
         cfg['symbols'] = [s for s in cfg['symbols'] if s in daily]
 
+        # ── Regime Timeline (Feature 4) ──
+        section_header('📈', 'Markt-Regime Timeline', '')
+        st.caption('SPY vs SMA200 – Grün = Risk-On, Rot = Risk-Off. Dreiecke = Trades.')
+        regime_fig = make_regime_timeline(daily, cfg)
+        if regime_fig:
+            st.plotly_chart(regime_fig, use_container_width=True)
+
         # ── Long Backtest ──
         section_header('📈', 'Long Backtest', 'LONG')
 
@@ -1392,6 +1850,76 @@ if run_btn:
 
         with st.expander('Alle Trades (Short)', expanded=False):
             display_trades_table(s_trades_df)
+
+        # ── Update Regime Timeline with all trades ──
+        all_trades = pd.concat([trades_df, s_trades_df], ignore_index=True)
+        if not all_trades.empty:
+            if 'side' not in trades_df.columns:
+                trades_df = trades_df.copy()
+                trades_df['side'] = 'LONG'
+            if 'side' not in s_trades_df.columns:
+                s_trades_df_copy = s_trades_df.copy()
+                s_trades_df_copy['side'] = 'SHORT'
+                all_trades = pd.concat([trades_df, s_trades_df_copy], ignore_index=True)
+            regime_fig_full = make_regime_timeline(daily, cfg, all_trades)
+            if regime_fig_full:
+                # Re-render with trade markers
+                st.divider()
+                section_header('📈', 'Markt-Regime Timeline (mit Trades)', '')
+                st.plotly_chart(regime_fig_full, use_container_width=True)
+
+        # ── Performance Attribution (Feature 5) ──
+        st.divider()
+        section_header('🎯', 'Performance-Attribution', '')
+        all_bt_trades = pd.concat([trades_df, s_trades_df], ignore_index=True)
+        if not all_bt_trades.empty:
+            fig_pnl, fig_wr, fig_avgr = make_performance_attribution(all_bt_trades, daily, cfg)
+            pa_c1, pa_c2 = st.columns(2)
+            with pa_c1:
+                if fig_pnl:
+                    st.plotly_chart(fig_pnl, use_container_width=True)
+                if fig_avgr:
+                    st.plotly_chart(fig_avgr, use_container_width=True)
+            with pa_c2:
+                if fig_wr:
+                    st.plotly_chart(fig_wr, use_container_width=True)
+        else:
+            st.info('Keine Trades für Performance-Attribution vorhanden.')
+
+        # ── Monte-Carlo Simulation (Feature 7) ──
+        st.divider()
+        section_header('🎲', 'Monte-Carlo Simulation (1.000 Permutationen)', '')
+        if st.button('Monte-Carlo starten', key='mc_start'):
+            if not all_bt_trades.empty and len(all_bt_trades) >= 3:
+                with st.spinner('Monte-Carlo läuft (1.000 Permutationen)...'):
+                    mc_result = run_monte_carlo(all_bt_trades, float(cfg.get('initial_cash', 5000)))
+                if mc_result is not None:
+                    mc_fig, mc_stats = mc_result
+                    st.plotly_chart(mc_fig, use_container_width=True)
+                    # Stats table
+                    mc_df = pd.DataFrame({
+                        'Kennzahl': ['Median CAGR', '5. Perzentil CAGR', '95. Perzentil CAGR',
+                                     'Median Max DD', '5. Perzentil Max DD', '95. Perzentil Max DD',
+                                     'Median Endkapital', '5. Perz. Endkapital', '95. Perz. Endkapital',
+                                     'Ruin-Wahrscheinlichkeit (>50% DD)'],
+                        'Wert': [
+                            f"{mc_stats['median_cagr']*100:.2f}%",
+                            f"{mc_stats['p5_cagr']*100:.2f}%",
+                            f"{mc_stats['p95_cagr']*100:.2f}%",
+                            f"{mc_stats['median_maxdd']*100:.2f}%",
+                            f"{mc_stats['p5_maxdd']*100:.2f}%",
+                            f"{mc_stats['p95_maxdd']*100:.2f}%",
+                            f"€{mc_stats['median_final']:,.2f}",
+                            f"€{mc_stats['p5_final']:,.2f}",
+                            f"€{mc_stats['p95_final']:,.2f}",
+                            f"{mc_stats['ruin_prob']:.1f}%",
+                        ],
+                    })
+                    st.dataframe(mc_df, use_container_width=True, hide_index=True)
+                else:
+                    st.warning('Zu wenige Trades für Monte-Carlo-Simulation.')
+            else:
+                st.warning('Mindestens 3 Trades nötig für Monte-Carlo.')
 
     # ===================================================================
     # DAILY LONG SIGNALSCAN
@@ -1529,6 +2057,59 @@ if run_btn:
             st.download_button('⬇ Download long_signals.csv',
                                data=df_sig.to_csv(index=False).encode('utf-8'),
                                file_name='long_signals.csv', mime='text/csv')
+
+            # ── Signal Detail with R/R Gauge + Watchlist (Features 2 & 6) ──
+            signal_syms = df_sig['symbol'].tolist()
+            section_header('📊', 'Signal-Detail', 'Interaktiv')
+            for _, row in df_sig.iterrows():
+                sym = row['symbol']
+                if sym not in daily:
+                    continue
+                with st.expander(f"📊 {sym} – Kurs: {row['price']:.2f} | "
+                                 f"Stop: {row['stop_price']:.2f} | TP: {row['tp_price']:.2f}",
+                                 expanded=False):
+                    # R/R gauge
+                    reward = row['tp_price'] - row['price']
+                    risk = row['price'] - row['stop_price']
+                    rr = reward / risk if risk > 0 else 0
+                    g_col, info_col = st.columns([1, 3])
+                    with g_col:
+                        rr_fig = make_rr_gauge(rr)
+                        st.plotly_chart(rr_fig, use_container_width=True)
+                    with info_col:
+                        st.markdown(f"""
+**{sym}** – Long Breakout Signal
+- **Entry:** {row['price']:.2f} | **Stop:** {row['stop_price']:.2f} | **TP:** {row['tp_price']:.2f}
+- **ATR:** {row['atr']:.2f} | **Vol-Ratio:** {row['vol_ratio']:.2f}
+- **R:R = {rr:.2f}**
+""")
+                    # Watchlist button
+                    if st.button(f'➕ Watchlist', key=f'wl_long_{sym}'):
+                        add_to_watchlist({
+                            'symbol': sym, 'side': 'LONG',
+                            'entry': row['price'], 'stop': row['stop_price'],
+                            'tp': row['tp_price'], 'date_added': _TODAY,
+                        })
+                        st.success(f'{sym} zur Watchlist hinzugefügt!')
+
+            # ── Korrelationsmatrix (Feature 1) ──
+            if len(signal_syms) >= 2:
+                st.divider()
+                section_header('📊', 'Korrelationsmatrix', '')
+                st.caption('Zeigt die Korrelation der täglichen Renditen (60 Tage) zwischen den '
+                           'Signalen. Hohe Korrelation (rot) = ähnliches Risiko.')
+                corr_fig = make_correlation_heatmap(daily, signal_syms)
+                if corr_fig:
+                    st.plotly_chart(corr_fig, use_container_width=True)
+
+            # ── Sektor-Verteilung (Feature 3) ──
+            if len(signal_syms) >= 1:
+                st.divider()
+                section_header('🏢', 'Sektor-Verteilung', '')
+                with st.spinner('Sektordaten laden...'):
+                    sunburst_fig = make_sector_sunburst(signal_syms, daily)
+                if sunburst_fig:
+                    st.plotly_chart(sunburst_fig, use_container_width=True)
         else:
             st.info('Keine Long-Signale gefunden.')
 
@@ -1604,6 +2185,7 @@ if run_btn:
             st.dataframe(styled_short, column_config=short_col_cfg, use_container_width=True)
 
             # ── Expandable signal detail charts ──
+            signal_syms_short = df_short['symbol'].tolist()
             section_header('📊', 'Signal-Detail Charts', 'Interaktiv')
             for _, row in df_short.iterrows():
                 sym = row['symbol']
@@ -1622,25 +2204,322 @@ if run_btn:
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
 
-                    # Mini metric cards for this signal
-                    mc1, mc2, mc3, mc4 = st.columns(4)
-                    mc1.markdown(metric_card('📊', 'RSI(14)', f"{row['rsi']}", AMETHYST),
-                                 unsafe_allow_html=True)
-                    mc2.markdown(metric_card('📏', 'EMA20-Dist',
-                                             f"{row['ema20_dist_%']}%", SAPPHIRE),
-                                 unsafe_allow_html=True)
-                    mc3.markdown(metric_card('🚀', '5d-Perf',
-                                             f"{row['5d_perf_%']}%", RUBY),
-                                 unsafe_allow_html=True)
-                    mc4.markdown(metric_card('🔊', 'Vol-Ratio',
-                                             f"{row['vol_ratio']}x", GOLD),
-                                 unsafe_allow_html=True)
+                    # R/R gauge (Feature 2) + metric cards
+                    reward = row['price'] - row['tp_ema20']
+                    risk = row['short_stop'] - row['price']
+                    rr = reward / risk if risk > 0 else 0
+                    g_col, mc_col = st.columns([1, 3])
+                    with g_col:
+                        rr_fig = make_rr_gauge(rr)
+                        st.plotly_chart(rr_fig, use_container_width=True)
+                    with mc_col:
+                        mc1, mc2, mc3, mc4 = st.columns(4)
+                        mc1.markdown(metric_card('📊', 'RSI(14)', f"{row['rsi']}", AMETHYST),
+                                     unsafe_allow_html=True)
+                        mc2.markdown(metric_card('📏', 'EMA20-Dist',
+                                                 f"{row['ema20_dist_%']}%", SAPPHIRE),
+                                     unsafe_allow_html=True)
+                        mc3.markdown(metric_card('🚀', '5d-Perf',
+                                                 f"{row['5d_perf_%']}%", RUBY),
+                                     unsafe_allow_html=True)
+                        mc4.markdown(metric_card('🔊', 'Vol-Ratio',
+                                                 f"{row['vol_ratio']}x", GOLD),
+                                     unsafe_allow_html=True)
+
+                    # Watchlist button (Feature 6)
+                    if st.button(f'➕ Watchlist', key=f'wl_short_{sym}'):
+                        add_to_watchlist({
+                            'symbol': sym, 'side': 'SHORT',
+                            'entry': row['price'], 'stop': row['short_stop'],
+                            'tp': row['tp_ema20'], 'date_added': _TODAY,
+                        })
+                        st.success(f'{sym} (Short) zur Watchlist hinzugefügt!')
 
             st.download_button('⬇ Download short_signals.csv',
                                data=df_short.to_csv(index=False).encode('utf-8'),
                                file_name='short_signals.csv', mime='text/csv')
+
+            # ── Korrelationsmatrix (Feature 1) ──
+            if len(signal_syms_short) >= 2:
+                st.divider()
+                section_header('📊', 'Korrelationsmatrix', '')
+                st.caption('Zeigt die Korrelation der täglichen Renditen (60 Tage) zwischen den '
+                           'Signalen. Hohe Korrelation (rot) = ähnliches Risiko.')
+                corr_fig_s = make_correlation_heatmap(daily, signal_syms_short)
+                if corr_fig_s:
+                    st.plotly_chart(corr_fig_s, use_container_width=True)
+
+            # ── Sektor-Verteilung (Feature 3) ──
+            if len(signal_syms_short) >= 1:
+                st.divider()
+                section_header('🏢', 'Sektor-Verteilung', '')
+                with st.spinner('Sektordaten laden...'):
+                    sunburst_fig_s = make_sector_sunburst(signal_syms_short, daily)
+                if sunburst_fig_s:
+                    st.plotly_chart(sunburst_fig_s, use_container_width=True)
         else:
             st.info('Keine Short-Signale gefunden – aktuell erfüllt keine Aktie alle Filter.')
+
+    # ===================================================================
+    # COMPARISON MODE (Feature 8)
+    # ===================================================================
+    elif action == '⚖️ Vergleich':
+        section_header('⚖️', 'Backtest-Vergleich', '')
+        st.caption('Vergleiche zwei Konfigurationen nebeneinander.')
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.subheader('Konfiguration A')
+            preset_a = st.selectbox('Preset A', list(PRESETS.keys()), index=1, key='preset_a')
+            cfg_a_text = st.text_area('Config A', value=json.dumps(load_preset_cfg(preset_a), indent=2),
+                                      height=300, key='cfg_a_text')
+        with col_b:
+            st.subheader('Konfiguration B')
+            preset_b = st.selectbox('Preset B', list(PRESETS.keys()), index=0, key='preset_b')
+            cfg_b_text = st.text_area('Config B', value=json.dumps(load_preset_cfg(preset_b), indent=2),
+                                      height=300, key='cfg_b_text')
+
+        if st.button('Backtest vergleichen', type='primary', key='compare_run'):
+            cfg_a = json.loads(cfg_a_text)
+            cfg_b = json.loads(cfg_b_text)
+            cfg_a['end'] = _TODAY
+            cfg_b['end'] = _TODAY
+            cfg_a['symbols'] = cfg.get('symbols', [])
+            cfg_b['symbols'] = cfg.get('symbols', [])
+
+            ui_status.caption('Daily Daten laden...')
+            all_syms = sorted(list(set(
+                cfg_a['symbols'] + cfg_b['symbols']
+                + [cfg_a.get('regime_symbol', 'SPY'), cfg_b.get('regime_symbol', 'SPY')]
+                + list(cfg_a.get('inverse_map', {}).values())
+                + list(cfg_b.get('inverse_map', {}).values())
+            )))
+            daily = load_daily(all_syms, min(cfg_a.get('start', '2021-01-01'),
+                                              cfg_b.get('start', '2021-01-01')),
+                               _TODAY, progress_cb=lambda d, t, m: prog_step(d, t, m))
+            cfg_a['symbols'] = [s for s in cfg_a['symbols'] if s in daily]
+            cfg_b['symbols'] = [s for s in cfg_b['symbols'] if s in daily]
+            cfg_a['sector_map'] = sector_map
+            cfg_b['sector_map'] = sector_map
+
+            ui_status.caption('Backtest A läuft...')
+            eq_a, tr_a, sum_a, _ = run_backtest(daily, cfg_a, progress_cb=None)
+            ui_status.caption('Backtest B läuft...')
+            eq_b, tr_b, sum_b, _ = run_backtest(daily, cfg_b, progress_cb=None)
+            ui_status.caption('Vergleich berechnet.')
+
+            # Dual equity curves
+            st.divider()
+            fig_eq_cmp = go.Figure()
+            eq_a_r = eq_a.reset_index()
+            eq_b_r = eq_b.reset_index()
+            fig_eq_cmp.add_trace(go.Scatter(x=eq_a_r['Date'], y=eq_a_r['Equity'],
+                                            mode='lines', line=dict(color=GOLD, width=2),
+                                            name='Config A'))
+            fig_eq_cmp.add_trace(go.Scatter(x=eq_b_r['Date'], y=eq_b_r['Equity'],
+                                            mode='lines', line=dict(color=SAPPHIRE, width=2),
+                                            name='Config B'))
+            _apply_dark_layout(fig_eq_cmp, 'Equity Curves – Vergleich', height=400)
+            st.plotly_chart(fig_eq_cmp, use_container_width=True)
+
+            # Dual drawdown curves
+            dd_a = (eq_a['Equity'] / eq_a['Equity'].cummax() - 1).reset_index()
+            dd_a.columns = ['Date', 'DD']
+            dd_b = (eq_b['Equity'] / eq_b['Equity'].cummax() - 1).reset_index()
+            dd_b.columns = ['Date', 'DD']
+            fig_dd_cmp = go.Figure()
+            fig_dd_cmp.add_trace(go.Scatter(x=dd_a['Date'], y=dd_a['DD'],
+                                            mode='lines', line=dict(color=GOLD, width=1.5),
+                                            name='Config A DD'))
+            fig_dd_cmp.add_trace(go.Scatter(x=dd_b['Date'], y=dd_b['DD'],
+                                            mode='lines', line=dict(color=SAPPHIRE, width=1.5),
+                                            name='Config B DD'))
+            _apply_dark_layout(fig_dd_cmp, 'Drawdown – Vergleich', height=300)
+            fig_dd_cmp.update_yaxes(tickformat='.1%')
+            st.plotly_chart(fig_dd_cmp, use_container_width=True)
+
+            # Metrics comparison table
+            st.subheader('Kennzahlen-Vergleich')
+            metrics_keys = ['final_equity', 'CAGR', 'MaxDrawdown', 'Volatility',
+                           'Trades', 'ProfitFactor', 'WinRate', 'AvgWin', 'AvgLoss',
+                           'Expectancy_R']
+            metrics_labels = ['Endkapital', 'CAGR', 'Max. Drawdown', 'Volatilität',
+                             'Trades', 'Profit Factor', 'Win Rate', 'Ø Gewinn',
+                             'Ø Verlust', 'Expectancy (R)']
+            higher_better = [True, True, False, False, None, True, True, True, False, True]
+
+            rows_cmp = []
+            for key, label, hb in zip(metrics_keys, metrics_labels, higher_better):
+                va = sum_a.get(key, np.nan)
+                vb = sum_b.get(key, np.nan)
+                if key in ('CAGR', 'MaxDrawdown', 'Volatility', 'WinRate'):
+                    fa = f"{va*100:.2f}%" if not pd.isna(va) else '-'
+                    fb = f"{vb*100:.2f}%" if not pd.isna(vb) else '-'
+                elif key == 'final_equity':
+                    fa = f"€{va:,.2f}" if not pd.isna(va) else '-'
+                    fb = f"€{vb:,.2f}" if not pd.isna(vb) else '-'
+                elif key in ('AvgWin', 'AvgLoss'):
+                    fa = f"€{va:.2f}" if not pd.isna(va) else '-'
+                    fb = f"€{vb:.2f}" if not pd.isna(vb) else '-'
+                elif key == 'Trades':
+                    fa = str(int(va)) if not pd.isna(va) else '-'
+                    fb = str(int(vb)) if not pd.isna(vb) else '-'
+                else:
+                    fa = f"{va:.2f}" if not pd.isna(va) else '-'
+                    fb = f"{vb:.2f}" if not pd.isna(vb) else '-'
+                winner = ''
+                if hb is not None and not pd.isna(va) and not pd.isna(vb):
+                    if hb:
+                        winner = 'A' if va > vb else ('B' if vb > va else '=')
+                    else:
+                        winner = 'A' if abs(va) < abs(vb) else ('B' if abs(vb) < abs(va) else '=')
+                rows_cmp.append({'Kennzahl': label, 'Config A': fa, 'Config B': fb,
+                                'Besser': winner})
+            cmp_df = pd.DataFrame(rows_cmp)
+            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+            # Monthly heatmaps side by side
+            st.subheader('Monatliche Rendite – Vergleich')
+            hm_a, hm_b = st.columns(2)
+            with hm_a:
+                st.caption('Config A')
+                fig_hm_a = make_monthly_heatmap(eq_a)
+                if fig_hm_a:
+                    st.plotly_chart(fig_hm_a, use_container_width=True)
+            with hm_b:
+                st.caption('Config B')
+                fig_hm_b = make_monthly_heatmap(eq_b)
+                if fig_hm_b:
+                    st.plotly_chart(fig_hm_b, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WATCHLIST MODE (Feature 6) – works without clicking Start
+# ═══════════════════════════════════════════════════════════════════════════
+if action == '📋 Watchlist':
+    section_header('📋', 'Watchlist & Alerts', '')
+
+    wl = load_watchlist()
+
+    if not wl:
+        st.info('Watchlist ist leer. Füge Signale über den Long- oder Short-Scan hinzu (➕ Watchlist).')
+    else:
+        # Build watchlist table with live prices
+        wl_rows = []
+        for entry in wl:
+            sym = entry['symbol']
+            side = entry.get('side', 'LONG')
+            entry_px = float(entry.get('entry', 0))
+            stop_px = float(entry.get('stop', 0))
+            tp_px = float(entry.get('tp', 0))
+            date_added = entry.get('date_added', '')
+
+            # Fetch current price
+            try:
+                t = yf.Ticker(sym)
+                hist = t.history(period='1d')
+                current_px = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
+            except Exception:
+                current_px = np.nan
+
+            dist_to_entry = ((current_px / entry_px - 1) * 100) if (entry_px > 0 and np.isfinite(current_px)) else np.nan
+
+            # Status determination
+            if np.isnan(current_px):
+                status = 'Unbekannt'
+            elif side == 'LONG':
+                if current_px <= stop_px:
+                    status = 'Stop erreicht'
+                elif current_px >= entry_px:
+                    status = 'Entry erreicht!'
+                else:
+                    status = 'Warten'
+            else:  # SHORT
+                if current_px >= stop_px:
+                    status = 'Stop erreicht'
+                elif current_px <= entry_px:
+                    status = 'Entry erreicht!'
+                else:
+                    status = 'Warten'
+
+            wl_rows.append({
+                'Symbol': sym, 'Seite': side, 'Entry': entry_px,
+                'Stop': stop_px, 'TP': tp_px, 'Hinzugefügt': date_added,
+                'Aktuell': round(current_px, 2) if np.isfinite(current_px) else None,
+                'Dist. Entry %': round(dist_to_entry, 2) if not np.isnan(dist_to_entry) else None,
+                'Status': status,
+            })
+
+        wl_df = pd.DataFrame(wl_rows)
+        st.dataframe(wl_df, use_container_width=True, hide_index=True)
+
+        # Remove buttons
+        st.caption('Eintrag entfernen:')
+        for entry in wl:
+            sym = entry['symbol']
+            side = entry.get('side', 'LONG')
+            if st.button(f'🗑 {sym} ({side}) entfernen', key=f'rm_{sym}_{side}'):
+                remove_from_watchlist(sym, side)
+                st.success(f'{sym} ({side}) entfernt.')
+                st.rerun()
+
+    # Alert configuration
+    st.divider()
+    section_header('🔔', 'Alert-Konfiguration', '')
+    st.caption('Hinweis: Alerts werden nur geprüft, wenn die App geöffnet ist. '
+               'Für automatische Alerts: `streamlit run app.py` mit Cron-Job oder separatem Alert-Script.')
+
+    tg_token = st.text_input('Telegram Bot Token', type='password',
+                              key='tg_token', value=st.session_state.get('tg_token_val', ''))
+    tg_chat = st.text_input('Telegram Chat ID', key='tg_chat',
+                             value=st.session_state.get('tg_chat_val', ''))
+    st.session_state['tg_token_val'] = tg_token
+    st.session_state['tg_chat_val'] = tg_chat
+
+    if st.button('🔔 Alerts prüfen', key='check_alerts'):
+        wl = load_watchlist()
+        if not wl:
+            st.info('Watchlist ist leer.')
+        else:
+            alerts = []
+            for entry in wl:
+                sym = entry['symbol']
+                side = entry.get('side', 'LONG')
+                entry_px = float(entry.get('entry', 0))
+                stop_px = float(entry.get('stop', 0))
+                try:
+                    t = yf.Ticker(sym)
+                    hist = t.history(period='1d')
+                    cpx = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
+                except Exception:
+                    cpx = np.nan
+                if np.isnan(cpx):
+                    continue
+                if side == 'LONG':
+                    if cpx >= entry_px:
+                        alerts.append(f'🟢 {sym} LONG Entry erreicht! Kurs: {cpx:.2f} >= {entry_px:.2f}')
+                    elif cpx <= stop_px:
+                        alerts.append(f'🔴 {sym} LONG Stop erreicht! Kurs: {cpx:.2f} <= {stop_px:.2f}')
+                else:
+                    if cpx <= entry_px:
+                        alerts.append(f'🟢 {sym} SHORT Entry erreicht! Kurs: {cpx:.2f} <= {entry_px:.2f}')
+                    elif cpx >= stop_px:
+                        alerts.append(f'🔴 {sym} SHORT Stop erreicht! Kurs: {cpx:.2f} >= {stop_px:.2f}')
+
+            if alerts:
+                for a in alerts:
+                    st.warning(a)
+                # Send Telegram if configured
+                if tg_token and tg_chat:
+                    msg = '<b>🔔 Zero Signal Scanner – Alerts</b>\n\n' + '\n'.join(alerts)
+                    ok = send_telegram_alert(tg_token, tg_chat, msg)
+                    if ok:
+                        st.success('Telegram-Benachrichtigung gesendet!')
+                    else:
+                        st.error('Telegram-Versand fehlgeschlagen.')
+            else:
+                st.success('Keine Alerts – alle Watchlist-Einträge im Wartebereich.')
+
 
 # ---------------------------------------------------------------------------
 # Footer
