@@ -1599,7 +1599,7 @@ def display_backtest_metrics(summary, prefix=''):
         col.markdown(metric_card(icon, label, value, color), unsafe_allow_html=True)
 
 
-def display_equity_drawdown(equity_df, title_suffix=''):
+def display_equity_drawdown(equity_df, title_suffix='', prefix='long'):
     """Render premium equity curve and drawdown charts side by side."""
     c1, c2 = st.columns([1.4, 1])
     with c1:
@@ -1614,7 +1614,7 @@ def display_equity_drawdown(equity_df, title_suffix=''):
             name='Equity',
         ))
         _apply_dark_layout(fig_eq, f'Equity Curve{title_suffix}', height=380)
-        st.plotly_chart(fig_eq, use_container_width=True)
+        st.plotly_chart(fig_eq, use_container_width=True, key=f'{prefix}_equity_curve')
 
     with c2:
         eq = equity_df['Equity']
@@ -1632,20 +1632,20 @@ def display_equity_drawdown(equity_df, title_suffix=''):
         ))
         _apply_dark_layout(fig_dd, f'Drawdown{title_suffix}', height=380)
         fig_dd.update_yaxes(tickformat='.1%')
-        st.plotly_chart(fig_dd, use_container_width=True)
+        st.plotly_chart(fig_dd, use_container_width=True, key=f'{prefix}_drawdown')
 
 
-def display_advanced_charts(equity_df, trades_df):
+def display_advanced_charts(equity_df, trades_df, prefix='long'):
     """Render monthly heatmap full-width, then trade distribution below."""
     fig_heat = make_monthly_heatmap(equity_df)
     if fig_heat:
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat, use_container_width=True, key=f'{prefix}_heatmap')
     fig_dist = make_trade_distribution(trades_df)
     if fig_dist:
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, use_container_width=True, key=f'{prefix}_distribution')
 
 
-def display_breakdown_tables(breakdown):
+def display_breakdown_tables(breakdown, prefix='long'):
     """Render breakdown tables with styled formatting."""
     breakdown_col_cfg = {
         'setup': st.column_config.TextColumn('Setup'),
@@ -1660,14 +1660,16 @@ def display_breakdown_tables(breakdown):
     with b1:
         st.caption('Nach Setup')
         st.dataframe(breakdown.get('by_setup', pd.DataFrame()),
-                     column_config=breakdown_col_cfg, use_container_width=True)
+                     column_config=breakdown_col_cfg, use_container_width=True,
+                     key=f'{prefix}_breakdown_setup')
     with b2:
         st.caption('Nach Exit-Grund')
         st.dataframe(breakdown.get('by_reason', pd.DataFrame()),
-                     column_config=breakdown_col_cfg, use_container_width=True)
+                     column_config=breakdown_col_cfg, use_container_width=True,
+                     key=f'{prefix}_breakdown_reason')
 
 
-def display_trades_table(trades_df):
+def display_trades_table(trades_df, prefix='long'):
     """Render styled trades table."""
     trades_col_cfg = {
         'symbol': st.column_config.TextColumn('Symbol'),
@@ -1683,7 +1685,8 @@ def display_trades_table(trades_df):
         'initial_risk_per_share': st.column_config.NumberColumn('Init. Risiko/Aktie', format='%.2f'),
         'R_multiple': st.column_config.NumberColumn('R-Vielfaches', format='%.2f'),
     }
-    st.dataframe(trades_df, column_config=trades_col_cfg, use_container_width=True)
+    st.dataframe(trades_df, column_config=trades_col_cfg, use_container_width=True,
+                 key=f'{prefix}_trades_table')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1787,25 +1790,27 @@ if run_btn:
 | **Expectancy (R)** | Erwartungswert je Trade in R; >0 = positiv |
 """)
 
-        display_equity_drawdown(equity_df, ' (Long)')
-        display_advanced_charts(equity_df, trades_df)
+        display_equity_drawdown(equity_df, ' (Long)', prefix='long')
+        display_advanced_charts(equity_df, trades_df, prefix='long')
 
         st.subheader('Downloads (Long)')
         dl1, dl2 = st.columns(2)
         with dl1:
             st.download_button('⬇ Download trades_long.csv',
                                data=trades_df.to_csv(index=False).encode('utf-8'),
-                               file_name='trades_long.csv', mime='text/csv')
+                               file_name='trades_long.csv', mime='text/csv',
+                               key='dl_trades_long')
         with dl2:
             st.download_button('⬇ Download equity_long.csv',
                                data=equity_df.reset_index().to_csv(index=False).encode('utf-8'),
-                               file_name='equity_long.csv', mime='text/csv')
+                               file_name='equity_long.csv', mime='text/csv',
+                               key='dl_equity_long')
 
         with st.expander('Breakdown (Long)', expanded=False):
-            display_breakdown_tables(breakdown)
+            display_breakdown_tables(breakdown, prefix='long')
 
         with st.expander('Alle Trades (Long)', expanded=False):
-            display_trades_table(trades_df)
+            display_trades_table(trades_df, prefix='long')
 
         # ── Short Backtest ──
         st.divider()
@@ -1828,25 +1833,27 @@ if run_btn:
         sbt_status.caption('Short-Backtest: done')
 
         display_backtest_metrics(s_summary)
-        display_equity_drawdown(s_equity_df, ' (Short)')
-        display_advanced_charts(s_equity_df, s_trades_df)
+        display_equity_drawdown(s_equity_df, ' (Short)', prefix='short')
+        display_advanced_charts(s_equity_df, s_trades_df, prefix='short')
 
         st.subheader('Downloads (Short)')
         dl3, dl4 = st.columns(2)
         with dl3:
             st.download_button('⬇ Download trades_short.csv',
                                data=s_trades_df.to_csv(index=False).encode('utf-8'),
-                               file_name='trades_short.csv', mime='text/csv')
+                               file_name='trades_short.csv', mime='text/csv',
+                               key='dl_trades_short')
         with dl4:
             st.download_button('⬇ Download equity_short.csv',
                                data=s_equity_df.reset_index().to_csv(index=False).encode('utf-8'),
-                               file_name='equity_short.csv', mime='text/csv')
+                               file_name='equity_short.csv', mime='text/csv',
+                               key='dl_equity_short')
 
         with st.expander('Breakdown (Short)', expanded=False):
-            display_breakdown_tables(s_breakdown)
+            display_breakdown_tables(s_breakdown, prefix='short')
 
         with st.expander('Alle Trades (Short)', expanded=False):
-            display_trades_table(s_trades_df)
+            display_trades_table(s_trades_df, prefix='short')
 
         # ── Update Regime Timeline with all trades ──
         all_trades = pd.concat([trades_df, s_trades_df], ignore_index=True)
