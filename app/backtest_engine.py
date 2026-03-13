@@ -706,6 +706,10 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             df['BL'] = df['High'].shift(1).rolling(bl_lookback).max()
         else:
             df['BL'] = df['Close'].shift(1).rolling(bl_lookback).max()
+        # Short TP targets
+        df['BL_Short'] = df['Low'].shift(1).rolling(bl_lookback).min()
+        df['BL_RecentHigh'] = df['High'].rolling(bl_lookback).max()
+        df['BL_RecentLow'] = df['Low'].rolling(bl_lookback).min()
 
     if progress_cb is not None:
         progress_cb(total_syms, total_syms, 'Short Indicators: done')
@@ -716,14 +720,20 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
     trades = []
     n = len(idx)
 
+    use_trailing = bool(cfg.get('use_trailing_stop', True))
+    atr_trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
+    atr_stop_mult = float(cfg.get('atr_stop_mult', 2.0))
+    short_max_position_pct = float(cfg.get('short_max_position_pct', 0.10))
+
     def mark_to_market_short(date):
         eq = cash
         for p in open_positions:
             px = data[p['symbol']].loc[date, 'Close']
             if pd.isna(px):
+                eq += p['margin']
                 continue
-            # Short P&L: entry_px - current_px (per share)
-            eq += p['shares'] * (p['entry_px'] - float(px))
+            # margin held + unrealized P&L
+            eq += p['margin'] + p['shares'] * (p['entry_px'] - float(px))
         return float(eq)
 
     for i, date in enumerate(idx):
@@ -744,6 +754,13 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             h_v = float(h)
             l_v = float(l)
             c_v = float(c)
+
+            # Trailing stop for shorts: trail DOWN as price drops
+            if use_trailing:
+                atr_raw = df.loc[date, 'ATR']
+                if not pd.isna(atr_raw) and float(atr_raw) > 0:
+                    new_trail_stop = c_v + atr_trail_mult * float(atr_raw)
+                    p['stop'] = min(p['stop'], new_trail_stop)
 
             exit_px = None
             reason = None
@@ -775,12 +792,10 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
                 new_open.append(p)
                 continue
 
-            # Short cover: buy to close
+            # Short cover: return margin + P&L
             exit_px_eff = exit_px * (1 + spread)
             pnl = (p['entry_px'] - exit_px_eff) * p['shares']
-            cash += p['shares'] * p['entry_px']  # return collateral
-            cash -= p['shares'] * exit_px_eff     # buy to cover cost
-            # net effect = pnl added to cash
+            cash += p['margin'] + pnl  # return margin and apply P&L
 
             initial_risk = float(p.get('initial_risk_per_share', np.nan))
             r_mult = np.nan
@@ -862,18 +877,20 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
 
             # TP zones
             tp_ema20 = ema20_v
-            bl_v = float(row.get('BL', np.nan)) if not pd.isna(row.get('BL')) else np.nan
-            tp_bl = bl_v
+            # TP_BL: 55-day LOW (support target for shorts)
+            bl_short_v = float(row.get('BL_Short', np.nan)) if not pd.isna(row.get('BL_Short')) else np.nan
+            tp_bl = bl_short_v
 
-            hh20 = float(row.get('HH20', np.nan)) if not pd.isna(row.get('HH20')) else np.nan
-            ll20 = float(df['Low'].iloc[max(0, i-19):i+1].min()) if i >= 1 else np.nan
-            if np.isfinite(hh20) and np.isfinite(ll20):
-                tp_fib38 = hh20 - 0.382 * (hh20 - ll20)
+            # TP_FIB38: 38.2% retracement of full 55-bar range
+            recent_high = float(row.get('BL_RecentHigh', np.nan)) if not pd.isna(row.get('BL_RecentHigh')) else np.nan
+            recent_low = float(row.get('BL_RecentLow', np.nan)) if not pd.isna(row.get('BL_RecentLow')) else np.nan
+            if np.isfinite(recent_high) and np.isfinite(recent_low) and recent_high > recent_low:
+                tp_fib38 = recent_high - 0.382 * (recent_high - recent_low)
             else:
                 tp_fib38 = np.nan
 
-            # Stop: above 20-bar high + 1 ATR
-            stop = (hh20 + atr_v) if np.isfinite(hh20) else (px + 2 * atr_v)
+            # Stop: ATR-based above entry (consistent with long backtest)
+            stop = px + atr_stop_mult * atr_v
 
             candidates.append((sym, score, {
                 'tp_ema20': tp_ema20,
@@ -900,7 +917,8 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
                 continue
 
             entry_px_eff = entry_px * (1 - spread)  # short sell proceeds
-            stop_v = info['stop']
+            # ATR-based stop (recalculate from actual entry price)
+            stop_v = entry_px_eff + atr_stop_mult * info['atr_v']
             initial_risk = stop_v - entry_px_eff
 
             risk_eur = risk_per_trade * eq_today
@@ -908,14 +926,18 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             if shares <= 0:
                 continue
 
-            collateral = shares * entry_px_eff
-            if collateral > cash:
+            # Position size cap: max short_max_position_pct of equity
+            max_shares_by_pct = int(np.floor(eq_today * short_max_position_pct / entry_px_eff))
+            shares = min(shares, max(1, max_shares_by_pct))
+
+            margin = shares * entry_px_eff
+            if margin > cash:
                 shares = int(np.floor(cash / entry_px_eff))
                 if shares <= 0:
                     continue
-                collateral = shares * entry_px_eff
+                margin = shares * entry_px_eff
 
-            cash -= collateral  # lock collateral
+            cash -= margin  # lock margin
 
             open_positions.append({
                 'symbol': sym,
@@ -924,6 +946,7 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
                 'entry_px': entry_px_eff,
                 'shares': shares,
                 'stop': stop_v,
+                'margin': margin,
                 'tp_ema20': info['tp_ema20'],
                 'tp_bl': info['tp_bl'],
                 'tp_fib38': info['tp_fib38'],
