@@ -1636,16 +1636,13 @@ def display_equity_drawdown(equity_df, title_suffix=''):
 
 
 def display_advanced_charts(equity_df, trades_df):
-    """Render monthly heatmap and trade distribution side by side."""
-    c1, c2 = st.columns(2)
-    with c1:
-        fig_heat = make_monthly_heatmap(equity_df)
-        if fig_heat:
-            st.plotly_chart(fig_heat, use_container_width=True)
-    with c2:
-        fig_dist = make_trade_distribution(trades_df)
-        if fig_dist:
-            st.plotly_chart(fig_dist, use_container_width=True)
+    """Render monthly heatmap full-width, then trade distribution below."""
+    fig_heat = make_monthly_heatmap(equity_df)
+    if fig_heat:
+        st.plotly_chart(fig_heat, use_container_width=True)
+    fig_dist = make_trade_distribution(trades_df)
+    if fig_dist:
+        st.plotly_chart(fig_dist, use_container_width=True)
 
 
 def display_breakdown_tables(breakdown):
