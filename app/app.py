@@ -1714,7 +1714,7 @@ if run_btn:
             symbols, resolve_table = resolve_inputs(lines, prefer_regions)
 
     with st.expander('Symbol‑Auflösung', expanded=False):
-        st.dataframe(resolve_table, use_container_width=True)
+        st.dataframe(resolve_table, use_container_width=True, key='resolve_table')
 
     cfg = dict(cfg)
     cfg['symbols'] = [s for s in symbols
@@ -1752,7 +1752,7 @@ if run_btn:
         st.caption('SPY vs SMA200 – Grün = Risk-On, Rot = Risk-Off. Dreiecke = Trades.')
         regime_fig = make_regime_timeline(daily, cfg)
         if regime_fig:
-            st.plotly_chart(regime_fig, use_container_width=True)
+            st.plotly_chart(regime_fig, use_container_width=True, key='regime_timeline_initial')
 
         # ── Long Backtest ──
         section_header('📈', 'Long Backtest', 'LONG')
@@ -1870,7 +1870,7 @@ if run_btn:
                 # Re-render with trade markers
                 st.divider()
                 section_header('📈', 'Markt-Regime Timeline (mit Trades)', '')
-                st.plotly_chart(regime_fig_full, use_container_width=True)
+                st.plotly_chart(regime_fig_full, use_container_width=True, key='regime_timeline_full')
 
         # ── Performance Attribution (Feature 5) ──
         st.divider()
@@ -1881,12 +1881,12 @@ if run_btn:
             pa_c1, pa_c2 = st.columns(2)
             with pa_c1:
                 if fig_pnl:
-                    st.plotly_chart(fig_pnl, use_container_width=True)
+                    st.plotly_chart(fig_pnl, use_container_width=True, key='pa_pnl')
                 if fig_avgr:
-                    st.plotly_chart(fig_avgr, use_container_width=True)
+                    st.plotly_chart(fig_avgr, use_container_width=True, key='pa_avgr')
             with pa_c2:
                 if fig_wr:
-                    st.plotly_chart(fig_wr, use_container_width=True)
+                    st.plotly_chart(fig_wr, use_container_width=True, key='pa_wr')
         else:
             st.info('Keine Trades für Performance-Attribution vorhanden.')
 
@@ -1899,7 +1899,7 @@ if run_btn:
                     mc_result = run_monte_carlo(all_bt_trades, float(cfg.get('initial_cash', 5000)))
                 if mc_result is not None:
                     mc_fig, mc_stats = mc_result
-                    st.plotly_chart(mc_fig, use_container_width=True)
+                    st.plotly_chart(mc_fig, use_container_width=True, key='mc_chart')
                     # Stats table
                     mc_df = pd.DataFrame({
                         'Kennzahl': ['Median CAGR', '5. Perzentil CAGR', '95. Perzentil CAGR',
@@ -1919,7 +1919,7 @@ if run_btn:
                             f"{mc_stats['ruin_prob']:.1f}%",
                         ],
                     })
-                    st.dataframe(mc_df, use_container_width=True, hide_index=True)
+                    st.dataframe(mc_df, use_container_width=True, hide_index=True, key='mc_stats_df')
                 else:
                     st.warning('Zu wenige Trades für Monte-Carlo-Simulation.')
             else:
@@ -2057,10 +2057,10 @@ if run_btn:
                 'Follow-Through ★': st.column_config.NumberColumn('Follow-Through ★',
                                                                    format='%.1f'),
             }
-            st.dataframe(styled, column_config=long_col_cfg, use_container_width=True)
+            st.dataframe(styled, column_config=long_col_cfg, use_container_width=True, key='long_signals_df')
             st.download_button('⬇ Download long_signals.csv',
                                data=df_sig.to_csv(index=False).encode('utf-8'),
-                               file_name='long_signals.csv', mime='text/csv')
+                               file_name='long_signals.csv', mime='text/csv', key='dl_long_signals')
 
             # ── Signal Detail with R/R Gauge + Watchlist (Features 2 & 6) ──
             signal_syms = df_sig['symbol'].tolist()
@@ -2079,7 +2079,7 @@ if run_btn:
                     g_col, info_col = st.columns([1, 3])
                     with g_col:
                         rr_fig = make_rr_gauge(rr)
-                        st.plotly_chart(rr_fig, use_container_width=True)
+                        st.plotly_chart(rr_fig, use_container_width=True, key=f'rr_long_{sym}')
                     with info_col:
                         st.markdown(f"""
 **{sym}** – Long Breakout Signal
@@ -2104,7 +2104,7 @@ if run_btn:
                            'Signalen. Hohe Korrelation (rot) = ähnliches Risiko.')
                 corr_fig = make_correlation_heatmap(daily, signal_syms)
                 if corr_fig:
-                    st.plotly_chart(corr_fig, use_container_width=True)
+                    st.plotly_chart(corr_fig, use_container_width=True, key='corr_long')
 
             # ── Sektor-Verteilung (Feature 3) ──
             if len(signal_syms) >= 1:
@@ -2113,7 +2113,7 @@ if run_btn:
                 with st.spinner('Sektordaten laden...'):
                     sunburst_fig = make_sector_sunburst(signal_syms, daily)
                 if sunburst_fig:
-                    st.plotly_chart(sunburst_fig, use_container_width=True)
+                    st.plotly_chart(sunburst_fig, use_container_width=True, key='sunburst_long')
         else:
             st.info('Keine Long-Signale gefunden.')
 
@@ -2186,7 +2186,7 @@ if run_btn:
                     format='%.1f',
                     help='Score 0–10: je höher, desto überhitzter – besser für Short-Einstieg'),
             }
-            st.dataframe(styled_short, column_config=short_col_cfg, use_container_width=True)
+            st.dataframe(styled_short, column_config=short_col_cfg, use_container_width=True, key='short_signals_df')
 
             # ── Expandable signal detail charts ──
             signal_syms_short = df_short['symbol'].tolist()
@@ -2206,7 +2206,7 @@ if run_btn:
                         entry_price=row['price'],
                     )
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key=f'chart_short_{sym}')
 
                     # R/R gauge (Feature 2) + metric cards
                     reward = row['price'] - row['tp_ema20']
@@ -2215,7 +2215,7 @@ if run_btn:
                     g_col, mc_col = st.columns([1, 3])
                     with g_col:
                         rr_fig = make_rr_gauge(rr)
-                        st.plotly_chart(rr_fig, use_container_width=True)
+                        st.plotly_chart(rr_fig, use_container_width=True, key=f'rr_short_{sym}')
                     with mc_col:
                         mc1, mc2, mc3, mc4 = st.columns(4)
                         mc1.markdown(metric_card('📊', 'RSI(14)', f"{row['rsi']}", AMETHYST),
@@ -2241,7 +2241,7 @@ if run_btn:
 
             st.download_button('⬇ Download short_signals.csv',
                                data=df_short.to_csv(index=False).encode('utf-8'),
-                               file_name='short_signals.csv', mime='text/csv')
+                               file_name='short_signals.csv', mime='text/csv', key='dl_short_signals')
 
             # ── Korrelationsmatrix (Feature 1) ──
             if len(signal_syms_short) >= 2:
@@ -2251,7 +2251,7 @@ if run_btn:
                            'Signalen. Hohe Korrelation (rot) = ähnliches Risiko.')
                 corr_fig_s = make_correlation_heatmap(daily, signal_syms_short)
                 if corr_fig_s:
-                    st.plotly_chart(corr_fig_s, use_container_width=True)
+                    st.plotly_chart(corr_fig_s, use_container_width=True, key='corr_short')
 
             # ── Sektor-Verteilung (Feature 3) ──
             if len(signal_syms_short) >= 1:
@@ -2260,7 +2260,7 @@ if run_btn:
                 with st.spinner('Sektordaten laden...'):
                     sunburst_fig_s = make_sector_sunburst(signal_syms_short, daily)
                 if sunburst_fig_s:
-                    st.plotly_chart(sunburst_fig_s, use_container_width=True)
+                    st.plotly_chart(sunburst_fig_s, use_container_width=True, key='sunburst_short')
         else:
             st.info('Keine Short-Signale gefunden – aktuell erfüllt keine Aktie alle Filter.')
 
@@ -2324,7 +2324,7 @@ if run_btn:
                                             mode='lines', line=dict(color=SAPPHIRE, width=2),
                                             name='Config B'))
             _apply_dark_layout(fig_eq_cmp, 'Equity Curves – Vergleich', height=400)
-            st.plotly_chart(fig_eq_cmp, use_container_width=True)
+            st.plotly_chart(fig_eq_cmp, use_container_width=True, key='cmp_equity')
 
             # Dual drawdown curves
             dd_a = (eq_a['Equity'] / eq_a['Equity'].cummax() - 1).reset_index()
@@ -2340,7 +2340,7 @@ if run_btn:
                                             name='Config B DD'))
             _apply_dark_layout(fig_dd_cmp, 'Drawdown – Vergleich', height=300)
             fig_dd_cmp.update_yaxes(tickformat='.1%')
-            st.plotly_chart(fig_dd_cmp, use_container_width=True)
+            st.plotly_chart(fig_dd_cmp, use_container_width=True, key='cmp_drawdown')
 
             # Metrics comparison table
             st.subheader('Kennzahlen-Vergleich')
@@ -2380,7 +2380,7 @@ if run_btn:
                 rows_cmp.append({'Kennzahl': label, 'Config A': fa, 'Config B': fb,
                                 'Besser': winner})
             cmp_df = pd.DataFrame(rows_cmp)
-            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+            st.dataframe(cmp_df, use_container_width=True, hide_index=True, key='cmp_metrics_df')
 
             # Monthly heatmaps side by side
             st.subheader('Monatliche Rendite – Vergleich')
@@ -2389,12 +2389,12 @@ if run_btn:
                 st.caption('Config A')
                 fig_hm_a = make_monthly_heatmap(eq_a)
                 if fig_hm_a:
-                    st.plotly_chart(fig_hm_a, use_container_width=True)
+                    st.plotly_chart(fig_hm_a, use_container_width=True, key='cmp_hm_a')
             with hm_b:
                 st.caption('Config B')
                 fig_hm_b = make_monthly_heatmap(eq_b)
                 if fig_hm_b:
-                    st.plotly_chart(fig_hm_b, use_container_width=True)
+                    st.plotly_chart(fig_hm_b, use_container_width=True, key='cmp_hm_b')
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2455,7 +2455,7 @@ if action == '📋 Watchlist':
             })
 
         wl_df = pd.DataFrame(wl_rows)
-        st.dataframe(wl_df, use_container_width=True, hide_index=True)
+        st.dataframe(wl_df, use_container_width=True, hide_index=True, key='watchlist_df')
 
         # Remove buttons
         st.caption('Eintrag entfernen:')
