@@ -338,8 +338,13 @@ DEFAULT_CFG = {
     "short_min_position": 300,
     "short_max_position": 1000,
     "short_cooldown_days": 20,
-    "short_regime_filter": "any",
+    "short_regime_filter": "risk_off_only",
     "short_max_holding_days": 30,
+    "short_atr_stop_mult": 3.0,
+    "short_trail_activation_pct": 0.03,
+    "short_min_rr": 1.0,
+    "short_min_tp_distance": 0.05,
+    "short_require_red_day": True,
 }
 
 # Presets (loaded from JSON files in app/)
@@ -1158,9 +1163,39 @@ with st.sidebar:
             sb_short_regime = st.selectbox(
                 'Regime-Filter',
                 options=['any', 'risk_off_only', 'weak_only'],
-                index=0,
+                index=['any', 'risk_off_only', 'weak_only'].index(
+                    DEFAULT_CFG.get('short_regime_filter', 'risk_off_only')),
                 help='any = immer shorten, risk_off_only = nur wenn SPY < SMA200, weak_only = nur wenn SPY < SMA50',
                 key='sb_short_regime')
+            sb_short_atr_stop = st.number_input(
+                'Short ATR-Stop Multiplikator', min_value=1.5, max_value=5.0,
+                value=float(DEFAULT_CFG.get('short_atr_stop_mult', 3.0)),
+                step=0.5, format='%.1f',
+                help='ATR-Multiplikator für Short-Stops (breiter = weniger Stopouts)',
+                key='sb_short_atr_stop')
+            sb_short_trail_act = st.number_input(
+                'Trail-Aktivierung (% Profit)', min_value=0.01, max_value=0.10,
+                value=float(DEFAULT_CFG.get('short_trail_activation_pct', 0.03)),
+                step=0.01, format='%.2f',
+                help='Trailing-Stop erst aktivieren, wenn Position ≥ diesen %-Gewinn hat (z.B. 0.03 = 3 %)',
+                key='sb_short_trail_act')
+            sb_short_min_rr = st.number_input(
+                'Min. Reward:Risk Ratio', min_value=0.5, max_value=3.0,
+                value=float(DEFAULT_CFG.get('short_min_rr', 1.0)),
+                step=0.1, format='%.1f',
+                help='Mindest-R:R — Trade wird übersprungen wenn Reward/Risk < diesem Wert',
+                key='sb_short_min_rr')
+            sb_short_min_tp_dist = st.number_input(
+                'Min. TP-Abstand (%)', min_value=0.02, max_value=0.20,
+                value=float(DEFAULT_CFG.get('short_min_tp_distance', 0.05)),
+                step=0.01, format='%.2f',
+                help='TPs näher als dieser %-Abstand zum Entry werden ignoriert (z.B. 0.05 = 5 %)',
+                key='sb_short_min_tp_dist')
+            sb_short_red_day = st.checkbox(
+                'Red-Day Bestätigung',
+                value=bool(DEFAULT_CFG.get('short_require_red_day', True)),
+                help='Nur einsteigen wenn heutiger Close < gestriger Close (erster roter Tag)',
+                key='sb_short_red_day')
             sb_short_max_hold = st.number_input(
                 'Max. Haltedauer Shorts (Tage)', min_value=5, max_value=365,
                 value=int(DEFAULT_CFG.get('short_max_holding_days', 30)),
@@ -1221,7 +1256,12 @@ with st.sidebar:
 | `short_min_position` | `300` | **Short**: Mindest-Positionsgröße in € |
 | `short_max_position` | `1000` | **Short**: Maximale Positionsgröße in € |
 | `short_cooldown_days` | `20` | **Short**: Tage Pause pro Symbol nach Exit |
-| `short_regime_filter` | `"any"` | **Short**: Regime-Filter (`any`/`risk_off_only`/`weak_only`) |
+| `short_regime_filter` | `"risk_off_only"` | **Short**: Regime-Filter (`any`/`risk_off_only`/`weak_only`) |
+| `short_atr_stop_mult` | `3.0` | **Short**: ATR-Multiplikator für Stops (breiter als Long) |
+| `short_trail_activation_pct` | `0.03` | **Short**: Trailing erst ab diesem %-Gewinn aktivieren |
+| `short_min_rr` | `1.0` | **Short**: Mindest-Reward:Risk Ratio |
+| `short_min_tp_distance` | `0.05` | **Short**: Min. TP-Abstand zum Entry (5 %) |
+| `short_require_red_day` | `true` | **Short**: Nur einsteigen bei Close < Vortages-Close |
 | `short_max_holding_days` | `30` | **Short**: Max. Haltedauer für Shorts (Tage) |
 """)
 
@@ -1765,7 +1805,12 @@ if run_btn:
         cfg['short_min_position'] = st.session_state.get('sb_short_min_pos', cfg.get('short_min_position', 300))
         cfg['short_max_position'] = st.session_state.get('sb_short_max_pos', cfg.get('short_max_position', 1000))
         cfg['short_cooldown_days'] = st.session_state.get('sb_short_cooldown', cfg.get('short_cooldown_days', 20))
-        cfg['short_regime_filter'] = st.session_state.get('sb_short_regime', cfg.get('short_regime_filter', 'any'))
+        cfg['short_regime_filter'] = st.session_state.get('sb_short_regime', cfg.get('short_regime_filter', 'risk_off_only'))
+        cfg['short_atr_stop_mult'] = st.session_state.get('sb_short_atr_stop', cfg.get('short_atr_stop_mult', 3.0))
+        cfg['short_trail_activation_pct'] = st.session_state.get('sb_short_trail_act', cfg.get('short_trail_activation_pct', 0.03))
+        cfg['short_min_rr'] = st.session_state.get('sb_short_min_rr', cfg.get('short_min_rr', 1.0))
+        cfg['short_min_tp_distance'] = st.session_state.get('sb_short_min_tp_dist', cfg.get('short_min_tp_distance', 0.05))
+        cfg['short_require_red_day'] = st.session_state.get('sb_short_red_day', cfg.get('short_require_red_day', True))
         cfg['short_max_holding_days'] = st.session_state.get('sb_short_max_hold', cfg.get('short_max_holding_days', 30))
 
     with st.spinner('Universe laden & ggf. auflösen...'):

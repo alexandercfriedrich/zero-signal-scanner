@@ -692,8 +692,8 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
     short_cooldown = {}  # symbol -> last_exit_date
     short_cooldown_days = int(cfg.get('short_cooldown_days', 20))
 
-    # Fix 3: Regime filter
-    short_regime_filter = cfg.get('short_regime_filter', 'any')
+    # Fix 3: Regime filter (V2: default risk_off_only)
+    short_regime_filter = cfg.get('short_regime_filter', 'risk_off_only')
 
     # Compute indicators for all symbols
     needed_list = sorted(list(needed))
@@ -737,8 +737,12 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
     n = len(idx)
 
     use_trailing = bool(cfg.get('use_trailing_stop', True))
-    atr_trail_mult = float(cfg.get('atr_trail_mult', cfg.get('atr_stop_mult', 2.0)))
-    atr_stop_mult = float(cfg.get('atr_stop_mult', 2.0))
+    short_atr_stop_mult = float(cfg.get('short_atr_stop_mult', 3.0))
+    atr_trail_mult = float(cfg.get('atr_trail_mult', short_atr_stop_mult))
+    short_trail_activation_pct = float(cfg.get('short_trail_activation_pct', 0.03))
+    short_min_rr = float(cfg.get('short_min_rr', 1.0))
+    short_min_tp_distance = float(cfg.get('short_min_tp_distance', 0.05))
+    short_require_red_day = bool(cfg.get('short_require_red_day', True))
     short_max_position_pct = float(cfg.get('short_max_position_pct', 0.10))
 
     def mark_to_market_short(date):
@@ -771,12 +775,14 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             l_v = float(l)
             c_v = float(c)
 
-            # Trailing stop for shorts: trail DOWN as price drops
+            # Trailing stop for shorts: only trail after position is profitable enough
             if use_trailing:
-                atr_raw = df.loc[date, 'ATR']
-                if not pd.isna(atr_raw) and float(atr_raw) > 0:
-                    new_trail_stop = c_v + atr_trail_mult * float(atr_raw)
-                    p['stop'] = min(p['stop'], new_trail_stop)
+                unrealized_pct = (p['entry_px'] - c_v) / p['entry_px']
+                if unrealized_pct >= short_trail_activation_pct:
+                    atr_raw = df.loc[date, 'ATR']
+                    if not pd.isna(atr_raw) and float(atr_raw) > 0:
+                        new_trail_stop = c_v + atr_trail_mult * float(atr_raw)
+                        p['stop'] = min(p['stop'], new_trail_stop)
 
             exit_px = None
             reason = None
@@ -935,20 +941,39 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             else:
                 tp_fib38 = np.nan
 
-            # Fix 4: Validate TP zones are actually below entry (at least 2%)
-            if np.isfinite(tp_ema20) and tp_ema20 >= px * 0.98:
+            # V2 Fix 4: TP minimum distance — TPs too close to entry are ignored
+            min_tp_px = px * (1 - short_min_tp_distance)
+            if np.isfinite(tp_ema20) and tp_ema20 >= min_tp_px:
                 tp_ema20 = np.nan
-            if np.isfinite(tp_fib38) and tp_fib38 >= px * 0.98:
+            if np.isfinite(tp_fib38) and tp_fib38 >= min_tp_px:
                 tp_fib38 = np.nan
-            if np.isfinite(tp_bl) and tp_bl >= px * 0.98:
+            if np.isfinite(tp_bl) and tp_bl >= min_tp_px:
                 tp_bl = np.nan
 
             # Require at least ONE valid TP zone
             if not any(np.isfinite(x) for x in [tp_ema20, tp_bl, tp_fib38]):
                 continue
 
-            # Stop: ATR-based above entry (consistent with long backtest)
-            stop = px + atr_stop_mult * atr_v
+            # Stop: ATR-based above entry (V2: wider stop for shorts)
+            stop = px + short_atr_stop_mult * atr_v
+
+            # V2 Fix 3: Minimum R:R filter — skip trades with poor reward/risk
+            valid_tps = [x for x in [tp_ema20, tp_bl, tp_fib38] if np.isfinite(x)]
+            best_tp = min(valid_tps)  # lowest = most profit for short
+            reward = px - best_tp
+            risk = stop - px
+            if risk <= 0 or reward / risk < short_min_rr:
+                continue
+
+            # V2 Fix 5: Red day confirmation — only enter if today's close < yesterday's close
+            if short_require_red_day:
+                if i > 0:
+                    prev_date = idx[i - 1]
+                    prev_close = df.loc[prev_date, 'Close']
+                    if not pd.isna(prev_close) and px >= float(prev_close):
+                        continue
+                else:
+                    continue  # no previous day available
 
             candidates.append((sym, score, {
                 'tp_ema20': tp_ema20,
@@ -975,8 +1000,8 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
                 continue
 
             entry_px_eff = entry_px * (1 - spread)  # short sell proceeds
-            # ATR-based stop (recalculate from actual entry price)
-            stop_v = entry_px_eff + atr_stop_mult * info['atr_v']
+            # ATR-based stop (V2: wider stop for shorts)
+            stop_v = entry_px_eff + short_atr_stop_mult * info['atr_v']
             initial_risk = stop_v - entry_px_eff
 
             risk_eur = risk_per_trade * eq_today
