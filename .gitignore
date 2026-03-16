@@ -1,1 +1,6 @@
 app/__pycache__/
+
+# Agent config (contains secrets)
+.claude/
+.mcp.json
+CLAUDE.md
