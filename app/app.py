@@ -331,10 +331,15 @@ DEFAULT_CFG = {
     "initial_cash": 5000,
 
     # Short-Scan Parameter
-    "short_rsi_min": 75,
-    "short_ema20_dist_min": 0.12,
-    "short_5d_perf_min": 0.10,
+    "short_rsi_min": 80,
+    "short_ema20_dist_min": 0.15,
+    "short_5d_perf_min": 0.12,
     "short_vol_mult_min": 1.0,
+    "short_min_position": 300,
+    "short_max_position": 1000,
+    "short_cooldown_days": 20,
+    "short_regime_filter": "any",
+    "short_max_holding_days": 30,
 }
 
 # Presets (loaded from JSON files in app/)
@@ -1112,6 +1117,57 @@ with st.sidebar:
     cfg_text = st.text_area('config.json (ohne symbols)', value=st.session_state['cfg_text'],
                             height=420)
 
+    # --- Short-Parameter Sidebar (shown for Short Signalscan & Backtest) ---
+    if action in ('Daily Short Signalscan', 'Backtest (Daily)'):
+        with st.expander('📉 Short-Parameter', expanded=False):
+            sb_short_rsi_min = st.number_input(
+                'RSI Mindestfilter', min_value=50, max_value=99,
+                value=int(DEFAULT_CFG.get('short_rsi_min', 80)),
+                help='Nur Aktien mit RSI ≥ diesem Wert werden geshorted',
+                key='sb_short_rsi_min')
+            sb_short_ema20_dist = st.number_input(
+                'EMA20 Distanz Mindestfilter (%)', min_value=0.0, max_value=1.0,
+                value=float(DEFAULT_CFG.get('short_ema20_dist_min', 0.15)),
+                step=0.01, format='%.2f',
+                help='Min. Abstand Close/EMA20 - 1 (z.B. 0.15 = 15 %)',
+                key='sb_short_ema20_dist')
+            sb_short_5d_perf = st.number_input(
+                '5-Tage Perf. Mindestfilter (%)', min_value=0.0, max_value=1.0,
+                value=float(DEFAULT_CFG.get('short_5d_perf_min', 0.12)),
+                step=0.01, format='%.2f',
+                help='Min. 5-Tage-Performance (z.B. 0.12 = 12 %)',
+                key='sb_short_5d_perf')
+            sb_short_min_pos = st.number_input(
+                'Mindest-Positionsgröße (€)', min_value=0, max_value=10000,
+                value=int(DEFAULT_CFG.get('short_min_position', 300)),
+                step=50,
+                help='Minimale Positionsgröße pro Short-Trade in €',
+                key='sb_short_min_pos')
+            sb_short_max_pos = st.number_input(
+                'Maximale Positionsgröße (€)', min_value=100, max_value=50000,
+                value=int(DEFAULT_CFG.get('short_max_position', 1000)),
+                step=100,
+                help='Maximale Positionsgröße pro Short-Trade in €',
+                key='sb_short_max_pos')
+            sb_short_cooldown = st.number_input(
+                'Cooldown pro Symbol (Tage)', min_value=0, max_value=120,
+                value=int(DEFAULT_CFG.get('short_cooldown_days', 20)),
+                step=5,
+                help='Nach Exit: so viele Tage kein Neueinstieg im selben Symbol',
+                key='sb_short_cooldown')
+            sb_short_regime = st.selectbox(
+                'Regime-Filter',
+                options=['any', 'risk_off_only', 'weak_only'],
+                index=0,
+                help='any = immer shorten, risk_off_only = nur wenn SPY < SMA200, weak_only = nur wenn SPY < SMA50',
+                key='sb_short_regime')
+            sb_short_max_hold = st.number_input(
+                'Max. Haltedauer Shorts (Tage)', min_value=5, max_value=365,
+                value=int(DEFAULT_CFG.get('short_max_holding_days', 30)),
+                step=5,
+                help='Maximale Haltedauer für Short-Positionen',
+                key='sb_short_max_hold')
+
     with st.expander('ℹ️ Konfigurations-Parameter'):
         st.markdown("""
 | Parameter | Standard | Beschreibung |
@@ -1158,10 +1214,15 @@ with st.sidebar:
 | `min_price` | `2.0` | Mindestkurs |
 | `min_dollar_volume` | `2000000` | Mindest-Dollar-Volume |
 | `initial_cash` | `5000` | Startkapital |
-| `short_rsi_min` | `75` | **Short-Scan**: Min. RSI |
-| `short_ema20_dist_min` | `0.12` | **Short-Scan**: Min. Abstand zur EMA20 (z.B. 0.12 = 12 %) |
-| `short_5d_perf_min` | `0.10` | **Short-Scan**: Min. 5-Tage-Performance |
+| `short_rsi_min` | `80` | **Short-Scan**: Min. RSI |
+| `short_ema20_dist_min` | `0.15` | **Short-Scan**: Min. Abstand zur EMA20 (z.B. 0.15 = 15 %) |
+| `short_5d_perf_min` | `0.12` | **Short-Scan**: Min. 5-Tage-Performance |
 | `short_vol_mult_min` | `1.0` | **Short-Scan**: Min. Vol-Ratio (Vol / VolSMA50) |
+| `short_min_position` | `300` | **Short**: Mindest-Positionsgröße in € |
+| `short_max_position` | `1000` | **Short**: Maximale Positionsgröße in € |
+| `short_cooldown_days` | `20` | **Short**: Tage Pause pro Symbol nach Exit |
+| `short_regime_filter` | `"any"` | **Short**: Regime-Filter (`any`/`risk_off_only`/`weak_only`) |
+| `short_max_holding_days` | `30` | **Short**: Max. Haltedauer für Shorts (Tage) |
 """)
 
     st.divider()
@@ -1695,6 +1756,17 @@ def display_trades_table(trades_df, prefix='long'):
 if run_btn:
     cfg = json.loads(cfg_text)
     cfg['end'] = _TODAY
+
+    # Merge sidebar short params if available (Short Signalscan or Backtest mode)
+    if action in ('Daily Short Signalscan', 'Backtest (Daily)'):
+        cfg['short_rsi_min'] = st.session_state.get('sb_short_rsi_min', cfg.get('short_rsi_min', 80))
+        cfg['short_ema20_dist_min'] = st.session_state.get('sb_short_ema20_dist', cfg.get('short_ema20_dist_min', 0.15))
+        cfg['short_5d_perf_min'] = st.session_state.get('sb_short_5d_perf', cfg.get('short_5d_perf_min', 0.12))
+        cfg['short_min_position'] = st.session_state.get('sb_short_min_pos', cfg.get('short_min_position', 300))
+        cfg['short_max_position'] = st.session_state.get('sb_short_max_pos', cfg.get('short_max_position', 1000))
+        cfg['short_cooldown_days'] = st.session_state.get('sb_short_cooldown', cfg.get('short_cooldown_days', 20))
+        cfg['short_regime_filter'] = st.session_state.get('sb_short_regime', cfg.get('short_regime_filter', 'any'))
+        cfg['short_max_holding_days'] = st.session_state.get('sb_short_max_hold', cfg.get('short_max_holding_days', 30))
 
     with st.spinner('Universe laden & ggf. auflösen...'):
         if universe_mode == 'S&P 500 (Wikipedia)':

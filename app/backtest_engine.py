@@ -672,17 +672,28 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
     idx = idx[(idx >= start) & (idx <= end)]
 
     # Short-scan parameters
-    rsi_min = float(cfg.get('short_rsi_min', 75))
-    ema_dist_min = float(cfg.get('short_ema20_dist_min', 0.12))
-    perf5_min = float(cfg.get('short_5d_perf_min', 0.10))
+    rsi_min = float(cfg.get('short_rsi_min', 80))
+    ema_dist_min = float(cfg.get('short_ema20_dist_min', 0.15))
+    perf5_min = float(cfg.get('short_5d_perf_min', 0.12))
     vol_mult_min = float(cfg.get('short_vol_mult_min', 1.0))
     atr_period = int(cfg.get('atr_period', 14))
     bl_lookback = int(cfg.get('breakout_lookback', 55))
     bl_src = cfg.get('breakout_level_source', 'close')
-    max_holding = int(cfg.get('max_holding_days', 30))
+    max_holding = int(cfg.get('short_max_holding_days', 30))
     spread = cfg.get('spread_bps_per_side', 8) / 10_000.0
     max_positions = int(cfg.get('max_positions', 5))
     risk_per_trade = float(cfg.get('risk_per_trade', 0.01))
+
+    # Fix 1: Min/Max position size
+    short_min_position = float(cfg.get('short_min_position', 300))
+    short_max_position = float(cfg.get('short_max_position', 1000))
+
+    # Fix 2: Cooldown per symbol
+    short_cooldown = {}  # symbol -> last_exit_date
+    short_cooldown_days = int(cfg.get('short_cooldown_days', 20))
+
+    # Fix 3: Regime filter
+    short_regime_filter = cfg.get('short_regime_filter', 'any')
 
     # Compute indicators for all symbols
     needed_list = sorted(list(needed))
@@ -713,6 +724,11 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
 
     if progress_cb is not None:
         progress_cb(total_syms, total_syms, 'Short Indicators: done')
+
+    # Regime SMA indicators for regime filter
+    reg = data[regime_symbol]
+    reg['SMA200'] = sma(reg['Close'], 200)
+    reg['SMA50'] = sma(reg['Close'], 50)
 
     cash = float(cfg['initial_cash'])
     equity_rows = []
@@ -783,7 +799,14 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
                         reason = tp_name
                         break
 
-            # Time-based exit
+            # Fix 6: Early time cut — if open 10+ days and losing >2%, exit
+            if exit_px is None and (date - p['entry_date']).days >= 10:
+                unrealized_pnl_pct = (p['entry_px'] - c_v) / p['entry_px']
+                if unrealized_pnl_pct < -0.02:  # losing more than 2%
+                    exit_px = c_v
+                    reason = 'TIME_CUT'
+
+            # Time-based exit (max holding)
             if exit_px is None and (date - p['entry_date']).days >= max_holding:
                 exit_px = c_v
                 reason = 'TIME'
@@ -796,6 +819,9 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             exit_px_eff = exit_px * (1 + spread)
             pnl = (p['entry_px'] - exit_px_eff) * p['shares']
             cash += p['margin'] + pnl  # return margin and apply P&L
+
+            # Fix 2: Record cooldown on exit
+            short_cooldown[p['symbol']] = date
 
             initial_risk = float(p.get('initial_risk_per_share', np.nan))
             r_mult = np.nan
@@ -831,12 +857,32 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
         if len(open_positions) >= max_positions:
             continue
 
+        # Fix 3: Regime filter — skip entries in strong uptrend
+        if short_regime_filter != 'any':
+            spy_close_v = reg.loc[date, 'Close']
+            if not pd.isna(spy_close_v):
+                spy_close_v = float(spy_close_v)
+                if short_regime_filter == 'risk_off_only':
+                    spy_sma200_v = reg.loc[date, 'SMA200']
+                    if not pd.isna(spy_sma200_v) and spy_close_v > float(spy_sma200_v):
+                        continue  # bull market — don't short
+                elif short_regime_filter == 'weak_only':
+                    spy_sma50_v = reg.loc[date, 'SMA50']
+                    if not pd.isna(spy_sma50_v) and spy_close_v > float(spy_sma50_v):
+                        continue  # short-term uptrend — don't short
+
         candidates = []
         held_syms = {p['symbol'] for p in open_positions}
 
         for sym in symbols:
             if sym in held_syms:
                 continue
+
+            # Fix 2: Cooldown check — skip if within cooldown period
+            if sym in short_cooldown:
+                days_since = (date - short_cooldown[sym]).days
+                if days_since < short_cooldown_days:
+                    continue
             df = data[sym]
             row = df.loc[date]
             if pd.isna(row.get('Close')) or pd.isna(row.get('ATR')):
@@ -889,6 +935,18 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
             else:
                 tp_fib38 = np.nan
 
+            # Fix 4: Validate TP zones are actually below entry (at least 2%)
+            if np.isfinite(tp_ema20) and tp_ema20 >= px * 0.98:
+                tp_ema20 = np.nan
+            if np.isfinite(tp_fib38) and tp_fib38 >= px * 0.98:
+                tp_fib38 = np.nan
+            if np.isfinite(tp_bl) and tp_bl >= px * 0.98:
+                tp_bl = np.nan
+
+            # Require at least ONE valid TP zone
+            if not any(np.isfinite(x) for x in [tp_ema20, tp_bl, tp_fib38]):
+                continue
+
             # Stop: ATR-based above entry (consistent with long backtest)
             stop = px + atr_stop_mult * atr_v
 
@@ -923,6 +981,16 @@ def run_short_backtest(data: dict, cfg: dict, progress_cb=None):
 
             risk_eur = risk_per_trade * eq_today
             shares = int(max(0, np.floor(risk_eur / max(1e-9, initial_risk))))
+            if shares <= 0:
+                continue
+
+            # Fix 1: Enforce min/max position size
+            position_value = shares * entry_px_eff
+            if position_value < short_min_position:
+                shares = int(np.ceil(short_min_position / entry_px_eff))
+            position_value = shares * entry_px_eff
+            if position_value > short_max_position:
+                shares = int(np.floor(short_max_position / entry_px_eff))
             if shares <= 0:
                 continue
 
