@@ -1498,6 +1498,13 @@ def fetch_yf(symbols, start=None, end=None, interval='1d', period=None):
                        group_by='ticker', threads=True, progress=False)
 
 
+def _ensure_date_column(sub: pd.DataFrame) -> pd.DataFrame:
+    """Rename the first column to 'Date' when yfinance returns an unnamed DatetimeIndex."""
+    if not sub.empty and sub.columns[0] != 'Date':
+        sub = sub.rename(columns={sub.columns[0]: 'Date'})
+    return sub
+
+
 def unpack_download(df, batch):
     out = {}
     if df is None or df.empty:
@@ -1505,12 +1512,12 @@ def unpack_download(df, batch):
     if isinstance(df.columns, pd.MultiIndex):
         for sym in batch:
             if sym in df.columns.levels[0]:
-                sub = df[sym].dropna().reset_index()
+                sub = _ensure_date_column(df[sym].dropna().reset_index())
                 if not sub.empty:
                     out[sym] = sub
     else:
         sym = batch[0]
-        sub = df.dropna().reset_index()
+        sub = _ensure_date_column(df.dropna().reset_index())
         if not sub.empty:
             out[sym] = sub
     return out
@@ -2050,6 +2057,10 @@ if run_btn:
         daily = load_daily(needed_daily, cfg['start'], cfg['end'],
                            progress_cb=lambda d, t, m: prog_step(d, t, m))
 
+        if cfg['regime_symbol'] not in daily:
+            st.error(f"Regime-Symbol '{cfg['regime_symbol']}' konnte nicht geladen werden. "
+                     "Bitte Internetverbindung prüfen oder ein anderes Regime-Symbol wählen.")
+            st.stop()
         reg = daily[cfg['regime_symbol']].copy()
         reg['Date'] = pd.to_datetime(reg['Date'])
         reg = reg.sort_values('Date').set_index('Date')
@@ -2242,6 +2253,10 @@ if run_btn:
         daily = load_daily(needed_daily, cfg['start'], cfg['end'],
                            progress_cb=lambda d, t, m: prog_step(d, t, m))
 
+        if cfg['regime_symbol'] not in daily:
+            st.error(f"Regime-Symbol '{cfg['regime_symbol']}' konnte nicht geladen werden. "
+                     "Bitte Internetverbindung prüfen oder ein anderes Regime-Symbol wählen.")
+            st.stop()
         reg = daily[cfg['regime_symbol']].copy()
         reg['Date'] = pd.to_datetime(reg['Date'])
         reg = reg.sort_values('Date').set_index('Date')
