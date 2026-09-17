@@ -34,7 +34,7 @@ Educational tool, no investment advice.
 Für Research (ohne die Live-Standardstrategie im Streamlit-UI zu ändern) gibt es ein separates Skript:
 
 ```bash
-cd /home/runner/work/zero-signal-scanner/zero-signal-scanner/app
+cd app
 python research_workflow.py --output-dir ./research_outputs --universe both
 ```
 

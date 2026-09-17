@@ -57,7 +57,7 @@ class BacktestResearchTests(unittest.TestCase):
         }
 
     def test_pullback_setup_generates_trade(self):
-        close = list(np.linspace(100, 140, 35)) + [136, 135, 136, 137, 138, 139, 140, 141]
+        close = list(np.linspace(100, 240, 220)) + [228, 226, 227, 229, 231, 232, 233, 234, 235, 236, 237, 238]
         data = {
             "AAA": self._make_df(close),
             "SPY": self._make_df(list(np.linspace(100, 130, len(close)))),
@@ -70,8 +70,6 @@ class BacktestResearchTests(unittest.TestCase):
                 "pullback_sma_tolerance_atr": 3.0,
                 "pullback_range_tolerance_atr": 3.0,
                 "pullback_invalidation_atr": 0.5,
-                "pullback_mid_sma": 10,
-                "pullback_long_sma": 20,
                 "max_breakout_extension_atr": 0.0,
             }
         )
