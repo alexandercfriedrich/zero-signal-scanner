@@ -77,7 +77,7 @@ Spalten: `split,universe,symbol`
 
 - In-Sample (nur Parameterauswahl): 2011-2018
 - OOS-1: 2019-2022
-- OOS-2: 2023-2026 bis letzter verfügbarer Handelstag
+- OOS-2: ab 2023 bis letzter verfügbarer Handelstag
 - Output-Dateien:
   - `research_summary.csv`
   - `research_trades.csv`

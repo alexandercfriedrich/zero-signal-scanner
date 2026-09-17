@@ -177,7 +177,7 @@ def symbols_for(universe: str, split: str, pit_df: pd.DataFrame | None) -> tuple
 def download_data(symbols: list[str], start: str, end: str) -> dict[str, pd.DataFrame]:
     out: dict[str, pd.DataFrame] = {}
     for s in symbols:
-        df = yf.download(s, start=start, end=end, interval="1d", auto_adjust=False, progress=False)
+        df = yf.download(s, start=start, end=end, interval="1d", auto_adjust=True, progress=False)
         if isinstance(df, pd.DataFrame) and not df.empty:
             out[s] = df
     return out
