@@ -19,6 +19,73 @@ from research_workflow import (  # noqa: E402
 
 
 class ResearchWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def _nasdaq_html(header: str, n: int = 100, table_id: str | None = "constituents") -> str:
+        rows = []
+        for i in range(n):
+            sym = f"SYM{i:03d}"
+            if i == 1:
+                sym = "BRK.B"
+            rows.append(f"<tr><td>{sym}</td><td>Name {i}</td></tr>")
+        id_attr = f' id="{table_id}"' if table_id else ""
+        table = (
+            f"<table{id_attr}>"
+            f"<thead><tr><th>{header}</th><th>Company</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody>"
+            f"</table>"
+        )
+        return f"<html><body><table><tr><th>Foo</th></tr><tr><td>Bar</td></tr></table>{table}</body></html>"
+
+    @staticmethod
+    def _resp(html: str):
+        class _Resp:
+            def __init__(self, text: str):
+                self.text = text
+
+            def raise_for_status(self):
+                return None
+
+        return _Resp(html)
+
+    def test_load_nasdaq100_symbols_accepts_ticker_header(self):
+        html = self._nasdaq_html("Ticker", 100, "constituents")
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            syms = rw.load_nasdaq100_symbols()
+        self.assertEqual(len(syms), 100)
+        self.assertIn("BRK-B", syms)
+
+    def test_load_nasdaq100_symbols_accepts_symbol_header(self):
+        html = self._nasdaq_html("Symbol", 100, "constituents")
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            syms = rw.load_nasdaq100_symbols()
+        self.assertEqual(len(syms), 100)
+
+    def test_load_nasdaq100_symbols_accepts_ticker_symbol_alias(self):
+        html = self._nasdaq_html("Ticker Symbol", 100, None)
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            syms = rw.load_nasdaq100_symbols()
+        self.assertEqual(len(syms), 100)
+
+    def test_load_nasdaq100_symbols_accepts_ticker_parenthesized_alias(self):
+        html = self._nasdaq_html("Ticker(s)", 100, "constituents")
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            syms = rw.load_nasdaq100_symbols()
+        self.assertEqual(len(syms), 100)
+
+    def test_load_nasdaq100_symbols_raises_when_no_matching_table(self):
+        html = "<html><body><table id='constituents'><tr><th>Company</th></tr><tr><td>A</td></tr></table></body></html>"
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            with self.assertRaises(ValueError) as ctx:
+                rw.load_nasdaq100_symbols()
+        self.assertIn("Detected tables", str(ctx.exception))
+
+    def test_load_nasdaq100_symbols_raises_on_implausible_count(self):
+        html = self._nasdaq_html("Ticker", 10, "constituents")
+        with patch.object(rw.requests, "get", return_value=self._resp(html)):
+            with self.assertRaises(ValueError) as ctx:
+                rw.load_nasdaq100_symbols()
+        self.assertIn("implausible unique symbol count", str(ctx.exception))
+
     def test_load_pit_csv_requires_columns(self):
         with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
             f.write("foo,bar\n1,2\n")

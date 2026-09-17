@@ -374,7 +374,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     def mark_to_market(date):
         eq = cash
         for p in open_positions:
-            px = data[p['symbol']].loc[date, 'Close']
+            df_sym = data[p['symbol']]
+            if date not in df_sym.index:
+                continue
+            px = df_sym.loc[date, 'Close']
             if pd.isna(px):
                 continue
             eq += p['shares'] * float(px)
@@ -385,7 +388,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         return wd == int(cfg.get('weekly_rebalance_weekday', 0))
 
     def score_candidate(sym: str, date: pd.Timestamp) -> float:
-        row = data[sym].loc[date]
+        df_sym = data[sym]
+        if date not in df_sym.index:
+            return -np.inf
+        row = df_sym.loc[date]
         if pd.isna(row.get('ATR')) or float(row['ATR']) <= 0:
             return -np.inf
 
@@ -417,6 +423,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         new_open = []
         for p in open_positions:
             df = data[p['symbol']]
+            if date not in df.index:
+                new_open.append(p)
+                continue
             h = df.loc[date, 'High']
             l = df.loc[date, 'Low']
             c = df.loc[date, 'Close']
@@ -510,10 +519,14 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
             new_open = []
             for p in open_positions:
+                df_p = data[p['symbol']]
+                if date not in df_p.index:
+                    new_open.append(p)
+                    continue
                 if p['symbol'] in keep_syms:
                     new_open.append(p)
                     continue
-                c = data[p['symbol']].loc[date, 'Close']
+                c = df_p.loc[date, 'Close']
                 if pd.isna(c):
                     new_open.append(p)
                     continue
@@ -559,7 +572,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         candidates = []
         if risk_on:
             for sym in symbols:
-                row = data[sym].loc[date]
+                df_sym = data[sym]
+                if date not in df_sym.index:
+                    continue
+                row = df_sym.loc[date]
                 if pd.isna(row.get('ATR')) or pd.isna(row.get('Close')):
                     continue
                 if float(row['Close']) < cfg['min_price']:
@@ -581,7 +597,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                                 confirmed = False
                                 break
                             prev_d = idx[i - k]
-                            pr = data[sym].loc[prev_d]
+                            if prev_d not in df_sym.index:
+                                confirmed = False
+                                break
+                            pr = df_sym.loc[prev_d]
                             prev_bl = pr.get('PivotClose') if bl_source == 'close' else pr.get('HH')
                             if pd.isna(prev_bl) or float(pr['Close']) <= float(prev_bl):
                                 confirmed = False
@@ -700,7 +719,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         picks = candidates[:n_new]
 
         for sym, _, setup, setup_meta in picks:
-            o = data[sym].loc[next_date, 'Open']
+            df_sym = data[sym]
+            if next_date not in df_sym.index:
+                continue
+            o = df_sym.loc[next_date, 'Open']
             if pd.isna(o):
                 continue
             entry_px = float(o)
@@ -708,7 +730,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                 continue
 
             entry_px_eff = entry_px * (1 + spread)
-            atr_raw = data[sym].loc[date, 'ATR']
+            atr_raw = df_sym.loc[date, 'ATR']
             if pd.isna(atr_raw):
                 continue
             atr_v = float(atr_raw)
@@ -719,7 +741,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
             stop = entry_px_eff - stop_dist
             if setup == 'CUP_HANDLE':
-                hl = data[sym].loc[date].get('CWH_HandleLow')
+                hl = df_sym.loc[date].get('CWH_HandleLow')
                 if hl is not None and not pd.isna(hl) and float(hl) > 0:
                     stop = min(stop, float(hl))
             elif setup == 'PULLBACK':

@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -76,30 +77,116 @@ def load_sp500_symbols() -> list[str]:
 
 
 def load_nasdaq100_symbols() -> list[str]:
-    resp = requests.get(
+    header_aliases = {
+        "ticker",
+        "symbol",
+        "ticker symbol",
+        "ticker symbols",
+        "ticker s",
+        "symbol s",
+        "nasdaq symbol",
+    }
+
+    def _norm_header(col: Any) -> str:
+        if isinstance(col, tuple):
+            col = " ".join(str(part) for part in col if str(part).strip())
+        txt = str(col).strip().lower()
+        txt = re.sub(r"[^a-z0-9]+", " ", txt)
+        return " ".join(txt.split())
+
+    def _table_diag(tables: list[pd.DataFrame]) -> str:
+        parts: list[str] = []
+        for i, t in enumerate(tables):
+            cols = [str(c) for c in t.columns]
+            parts.append(f"#{i}: rows={len(t)}, cols={cols}")
+        return "; ".join(parts) if parts else "no tables parsed"
+
+    def _extract_symbols(df: pd.DataFrame) -> list[str]:
+        normalized_cols = {_norm_header(c): c for c in df.columns}
+        match_key = next((k for k in header_aliases if k in normalized_cols), None)
+        if match_key is None:
+            return []
+        col = normalized_cols[match_key]
+        syms = (
+            df[col]
+            .astype(str)
+            .str.replace(r"\[[^\]]+\]", "", regex=True)
+            .str.strip()
+            .str.upper()
+            .str.replace(".", "-", regex=False)
+        )
+        syms = [s for s in syms.tolist() if s]
+        unique_syms = sorted(set(syms))
+        return unique_syms
+
+    def _validate_symbols(syms: list[str], source: str, tables: list[pd.DataFrame]) -> list[str]:
+        if not syms:
+            raise ValueError(f"Nasdaq-100 parsing failed from {source}: symbol list is empty. Detected tables: {_table_diag(tables)}")
+        invalid = [s for s in syms if not re.fullmatch(r"[A-Z0-9-]+", s)]
+        if invalid:
+            bad = ", ".join(invalid[:10])
+            raise ValueError(f"Nasdaq-100 parsing failed from {source}: invalid Yahoo symbols: {bad}")
+        if not (90 <= len(syms) <= 120):
+            raise ValueError(
+                f"Nasdaq-100 parsing failed from {source}: implausible unique symbol count={len(syms)} (expected 90..120). "
+                f"Detected tables: {_table_diag(tables)}"
+            )
+        return syms
+
+    source_urls = [
+        "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
         "https://en.wikipedia.org/wiki/Nasdaq-100",
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    tables = pd.read_html(StringIO(resp.text))
-    frame = None
-    sym_col = None
-    for t in tables:
-        if len(t) < 50:
+    ]
+    all_failures: list[str] = []
+
+    for url in source_urls:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+        html_text = resp.text
+        all_tables = pd.read_html(StringIO(html_text))
+
+        try:
+            preferred_tables = pd.read_html(StringIO(html_text), attrs={"id": "constituents"})
+        except ValueError:
+            preferred_tables = []
+
+        if preferred_tables:
+            if len(preferred_tables) > 1:
+                all_failures.append(
+                    f"{url}: multiple tables matched id='constituents' ({len(preferred_tables)}); tables: {_table_diag(all_tables)}"
+                )
+                continue
+            syms = _extract_symbols(preferred_tables[0])
+            try:
+                return _validate_symbols(syms, f"{url} table id=constituents", all_tables)
+            except ValueError as exc:
+                all_failures.append(str(exc))
+                continue
+
+        stable_candidates: list[tuple[int, list[str]]] = []
+        for i, t in enumerate(all_tables):
+            normalized_cols = {_norm_header(c) for c in t.columns}
+            has_company_col = any(c in {"company", "company name", "name", "security"} for c in normalized_cols)
+            syms = _extract_symbols(t)
+            if has_company_col and syms:
+                stable_candidates.append((i, syms))
+
+        plausible = [(i, s) for i, s in stable_candidates if 90 <= len(s) <= 120]
+        if len(plausible) == 1:
+            return _validate_symbols(plausible[0][1], f"{url} stable fallback table #{plausible[0][0]}", all_tables)
+        if len(plausible) > 1:
+            all_failures.append(
+                f"{url}: multiple plausible stable fallback tables={ [i for i, _ in plausible] }; tables: {_table_diag(all_tables)}"
+            )
             continue
-        for c in t.columns:
-            lc = str(c).strip().lower()
-            if "ticker" in lc or "symbol" in lc:
-                frame = t
-                sym_col = c
-                break
-        if frame is not None:
-            break
-    if frame is None or sym_col is None:
-        raise ValueError("Nasdaq-100 constituents table with ticker/symbol column not found on source page.")
-    syms = frame[sym_col].astype(str).str.strip().tolist()
-    return [s.replace(".", "-") for s in syms]
+
+        all_failures.append(
+            f"{url}: no valid constituents table with accepted headers "
+            "['ticker','symbol','ticker symbol','ticker symbols','ticker(s)','symbol(s)','nasdaq symbol']; "
+            f"tables: {_table_diag(all_tables)}"
+        )
+
+    raise ValueError("Nasdaq-100 constituents parsing failed across sources. " + " | ".join(all_failures))
 
 
 def load_pit_csv(path: str | None) -> pd.DataFrame | None:
