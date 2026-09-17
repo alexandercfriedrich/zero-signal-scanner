@@ -193,7 +193,8 @@ def score_for_selection(summary: dict[str, Any]) -> float:
 
 
 def benchmark_summary(bench_df: pd.DataFrame) -> dict[str, float]:
-    close = bench_df["Close"].dropna()
+    close_col = "Adj Close" if "Adj Close" in bench_df.columns else "Close"
+    close = bench_df[close_col].dropna()
     if close.empty:
         return {"Benchmark_CAGR": np.nan, "Benchmark_MaxDrawdown": np.nan, "Benchmark_Sortino": np.nan}
     ret = close.pct_change().fillna(0)

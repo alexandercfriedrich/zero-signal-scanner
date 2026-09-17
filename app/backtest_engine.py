@@ -41,6 +41,17 @@ def normalize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns:
             raise ValueError(f"Missing column: {c}")
 
+    if 'Adj close' in df.columns and 'Adj Close' not in df.columns:
+        df = df.rename(columns={'Adj close': 'Adj Close'})
+    if 'Adj Close' in df.columns:
+        adj = pd.to_numeric(df['Adj Close'], errors='coerce')
+        close = pd.to_numeric(df['Close'], errors='coerce')
+        factor = adj / close.replace(0, np.nan)
+        valid = np.isfinite(factor) & (factor > 0)
+        for c in ['Open', 'High', 'Low', 'Close']:
+            s = pd.to_numeric(df[c], errors='coerce')
+            df[c] = s.where(~valid, s * factor)
+
     if 'Volume' not in df.columns:
         df['Volume'] = np.nan
 
@@ -482,7 +493,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         eq_today = mark_to_market(date)
         exposure = np.nan
         if np.isfinite(eq_today) and abs(eq_today) > 1e-12:
-            exposure = max(0.0, min(1.0, float((eq_today - cash) / eq_today)))
+            exposure = float((eq_today - cash) / eq_today)
         equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash, 'OpenPositions': len(open_positions), 'Exposure': exposure})
 
         risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False

@@ -84,4 +84,4 @@ Spalten: `split,universe,symbol`
   - `optimization_confirmation.csv`
   - `research_report.md`
 
-Eine Variante gilt als bestätigt, wenn sie **in beiden OOS-Perioden** nach Kosten mindestens bei `Expectancy_R` und/oder `Sortino_approx` die Baseline verbessert, ohne den Max Drawdown wesentlich zu verschlechtern.
+Eine Variante gilt als bestätigt, wenn sie **in beiden OOS-Perioden** nach Kosten mindestens bei `Expectancy_R` und/oder `Sortino_approx` die Baseline verbessert und der Max Drawdown nicht mehr als **2 Prozentpunkte** schlechter ist als bei der Baseline.

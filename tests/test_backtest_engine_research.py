@@ -77,7 +77,19 @@ class BacktestResearchTests(unittest.TestCase):
         _, trades, _, _ = run_backtest(data, cfg)
 
         self.assertFalse(trades.empty)
-        self.assertIn("PULLBACK", set(trades["setup"].tolist()))
+        pullbacks = trades[trades["setup"] == "PULLBACK"]
+        self.assertFalse(pullbacks.empty)
+        trade = pullbacks.iloc[0]
+        entry_date = pd.Timestamp(trade["entry_date"])
+        signal_date = data["AAA"].index[data["AAA"].index.get_loc(entry_date) - 1]
+        sym_df = data["AAA"]
+        high = sym_df["High"]
+        low = sym_df["Low"]
+        close_prev = sym_df["Close"].shift(1)
+        tr = pd.concat([(high - low), (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
+        atr_at_signal = tr.rolling(3, min_periods=3).mean().loc[signal_date]
+        baseline_stop_dist = cfg["atr_stop_mult"] * float(atr_at_signal)
+        self.assertGreater(float(trade["initial_risk_per_share"]), float(baseline_stop_dist))
 
     def test_entry_uses_next_day_open_without_lookahead(self):
         close = [10.0] * 25 + [9.95, 9.98, 10.0, 10.02, 10.05, 10.08, 10.1, 11.5, 11.1, 11.2, 11.25]
