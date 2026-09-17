@@ -129,6 +129,27 @@ class BacktestResearchTests(unittest.TestCase):
         self.assertIn("MFE_R", trades.columns)
         self.assertIn("MAE_R", trades.columns)
 
+    def test_entry_mode_pullback_only_blocks_breakout(self):
+        close = list(np.linspace(100, 240, 220)) + [228, 226, 227, 229, 231, 232, 233, 234, 235, 236, 237, 238]
+        data = {
+            "AAA": self._make_df(close),
+            "SPY": self._make_df(list(np.linspace(100, 130, len(close)))),
+        }
+        idx = data["AAA"].index
+        cfg = self._base_cfg(str(idx[0].date()), str(idx[-1].date()))
+        cfg.update(
+            {
+                "entry_mode": "pullback_only",
+                "enable_pullback_entry": True,
+                "pullback_sma_tolerance_atr": 3.0,
+                "pullback_range_tolerance_atr": 3.0,
+                "pullback_invalidation_atr": 0.5,
+            }
+        )
+        _, trades, _, _ = run_backtest(data, cfg)
+        self.assertFalse(trades.empty)
+        self.assertTrue(set(trades["setup"].tolist()).issubset({"PULLBACK"}))
+
 
 if __name__ == "__main__":
     unittest.main()

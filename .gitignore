@@ -1,4 +1,6 @@
 app/__pycache__/
+__pycache__/
+*.pyc
 
 # Agent config (contains secrets)
 .claude/

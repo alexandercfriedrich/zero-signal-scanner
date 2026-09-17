@@ -361,6 +361,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     rs63_min = float(cfg.get('rs63_min', -1e9))
     rs126_min = float(cfg.get('rs126_min', -1e9))
 
+    entry_mode = str(cfg.get('entry_mode', 'legacy')).strip().lower()
+    allow_breakout = entry_mode in {'legacy', 'breakout_only', 'breakout_plus_pullback', 'breakout_plus_vcp'}
+    allow_pullback = (entry_mode == 'legacy' and enable_pullback) or (entry_mode in {'pullback_only', 'breakout_plus_pullback'})
+    allow_vcp = (entry_mode == 'legacy' and enable_vcp) or (entry_mode in {'vcp_only', 'breakout_plus_vcp'})
+
     def mark_to_market(date):
         eq = cash
         for p in open_positions:
@@ -561,7 +566,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                 setup = None
                 setup_meta = {}
                 piv = row.get('PivotClose') if bl_source == 'close' else row.get('HH')
-                if piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
+                if allow_breakout and piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
                     setup = 'BREAKOUT'
                     # Consecutive-close confirmation
                     if confirm >= 2:
@@ -602,7 +607,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                         if pd.isna(vc) or (not bool(vc)):
                             setup = None
 
-                if setup is None and enable_pullback:
+                if setup is None and allow_pullback:
                     atr_val = row.get('ATR')
                     sma20_v = row.get('SMA20')
                     sma50_v = row.get('SMA50')
@@ -636,7 +641,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                             else:
                                 setup_meta['pullback_invalidation_ref'] = float(sma20_f)
 
-                if setup is None and enable_vcp:
+                if setup is None and allow_vcp:
                     ratio_now = row.get('ATR10_50_RatioPrev')
                     rh = row.get('RangeHigh10')
                     rl = row.get('RangeLow10')
