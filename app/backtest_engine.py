@@ -471,7 +471,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     'setup': p.get('setup', 'BREAKOUT'),
                     'initial_risk_per_share': initial_risk_per_share,
                     'R_multiple': r_mult,
-                    'holding_days': int((date - p['entry_date']).days),
+                    'holding_days': int(max(0, i - int(p.get('entry_i', i)))),
                     'MFE_R': float(p.get('MFE_R', np.nan)),
                     'MAE_R': float(p.get('MAE_R', np.nan)),
                 }
@@ -527,7 +527,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                         'setup': p.get('setup', 'BREAKOUT'),
                         'initial_risk_per_share': initial_risk_per_share,
                         'R_multiple': r_mult,
-                        'holding_days': int((date - p['entry_date']).days),
+                        'holding_days': int(max(0, i - int(p.get('entry_i', i)))),
                         'MFE_R': float(p.get('MFE_R', np.nan)),
                         'MAE_R': float(p.get('MAE_R', np.nan)),
                     }
@@ -775,6 +775,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     'setup': setup,
                     'initial_risk_per_share': float(entry_px_eff - float(stop)),
                     'peak_high': float(entry_px),
+                    'entry_i': i + 1,
                     'MFE_R': 0.0,
                     'MAE_R': 0.0,
                 }
@@ -795,7 +796,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     max_dd = dd.min()
 
     stats = compute_trade_stats(trades_df)
-    exposure_avg = float(equity_df['Exposure'].mean()) if 'Exposure' in equity_df.columns and not equity_df.empty else np.nan
+    exposure_avg = np.nan
+    if 'Exposure' in equity_df.columns and not equity_df.empty:
+        exp_series = equity_df['Exposure'].dropna()
+        exposure_avg = float(exp_series.mean()) if not exp_series.empty else np.nan
     turnover = np.nan
     if trades_df is not None and not trades_df.empty:
         notional = (trades_df['entry_px'] * trades_df['shares']).abs() + (trades_df['exit_px'] * trades_df['shares']).abs()

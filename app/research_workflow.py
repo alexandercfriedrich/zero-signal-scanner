@@ -149,7 +149,7 @@ def load_nasdaq100_symbols() -> list[str]:
             frame = t
             break
     if frame is None:
-        frame = tables[4]
+        raise ValueError("Nasdaq-100 constituents table with 'Ticker' column not found on source page.")
     sym_col = "Ticker" if "Ticker" in frame.columns else frame.columns[1]
     syms = frame[sym_col].astype(str).str.strip().tolist()
     return [s.replace(".", "-") for s in syms]
@@ -193,10 +193,31 @@ def download_data(symbols: list[str], start: str, end: str) -> dict[str, pd.Data
 def score_for_selection(summary: dict[str, Any]) -> float:
     sortino = summary.get("Sortino_approx", np.nan)
     expectancy = summary.get("Expectancy_R", np.nan)
+    has_finite = bool(np.isfinite(sortino) or np.isfinite(expectancy))
+    if not has_finite:
+        return np.nan
     s = 0.0
-    s += float(sortino) if np.isfinite(sortino) else -999.0
-    s += float(expectancy) if np.isfinite(expectancy) else -999.0
+    s += float(sortino) if np.isfinite(sortino) else 0.0
+    s += float(expectancy) if np.isfinite(expectancy) else 0.0
     return s
+
+
+def select_family_winners(in_sample_results: list[RunResult]) -> set[str]:
+    selected_ids: set[str] = set()
+    for fam in ["A", "B", "C", "D", "E"]:
+        fam_rows = []
+        for r in in_sample_results:
+            if r.family != fam:
+                continue
+            sc = score_for_selection(r.summary)
+            if np.isfinite(sc):
+                fam_rows.append({"variant_id": r.variant_id, "score": sc})
+        if not fam_rows:
+            continue
+        score_df = pd.DataFrame(fam_rows)
+        best_id = score_df.groupby("variant_id", dropna=False)["score"].mean().sort_values(ascending=False).index[0]
+        selected_ids.add(str(best_id))
+    return selected_ids
 
 
 def benchmark_summary(bench_df: pd.DataFrame) -> dict[str, float]:
@@ -227,7 +248,16 @@ def run_one_variant(universe: str, split: str, start: str, end: str, benchmark: 
     })
     eq, trades, summary, _ = run_backtest(data, cfg)
     summary = dict(summary)
-    summary.update(benchmark_summary(data[benchmark].loc[(data[benchmark].index >= pd.Timestamp(start)) & (data[benchmark].index <= pd.Timestamp(end))]))
+    bdf = data[benchmark]
+    bidx = bdf.index
+    if getattr(bidx, "tz", None) is not None:
+        start_ts = pd.Timestamp(start).tz_localize(bidx.tz)
+        end_ts = pd.Timestamp(end).tz_localize(bidx.tz)
+    else:
+        start_ts = pd.Timestamp(start)
+        end_ts = pd.Timestamp(end)
+    bdf_split = bdf.loc[(bidx >= start_ts) & (bidx <= end_ts)]
+    summary.update(benchmark_summary(bdf_split))
     return RunResult(
         universe=universe,
         split=split,
@@ -309,14 +339,7 @@ def main() -> None:
                 all_trades.append(t)
 
     # Select one variant per family from IS (aggregated across selected universes)
-    selected_ids: set[str] = set()
-    for fam in ["A", "B", "C", "D", "E"]:
-        fam_runs = [r for r in in_sample_results if r.family == fam]
-        if not fam_runs:
-            continue
-        score_df = pd.DataFrame([{"variant_id": r.variant_id, "score": score_for_selection(r.summary)} for r in fam_runs])
-        best_id = score_df.groupby("variant_id", dropna=False)["score"].mean().sort_values(ascending=False).index[0]
-        selected_ids.add(str(best_id))
+    selected_ids = select_family_winners(in_sample_results)
 
     # Phase 2: OOS runs using only baseline + selected IS winners
     oos_variants = [{"id": "baseline", "family": "baseline", "label": "55d Breakout Baseline", "overrides": {}}]
