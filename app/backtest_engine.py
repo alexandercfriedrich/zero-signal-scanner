@@ -162,7 +162,12 @@ def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
             'WinRate': np.nan,
             'AvgWin': np.nan,
             'AvgLoss': np.nan,
+            'AvgWin_R': np.nan,
+            'AvgLoss_R': np.nan,
             'Expectancy_R': np.nan,
+            'MedianHoldDays': np.nan,
+            'MedianMFE_R': np.nan,
+            'MedianMAE_R': np.nan,
         }
 
     wins = trades_df[trades_df['pnl'] > 0]
@@ -177,15 +182,38 @@ def compute_trade_stats(trades_df: pd.DataFrame) -> dict:
     avg_loss = float(losses['pnl'].mean()) if not losses.empty else 0.0
 
     exp_r = np.nan
+    avg_win_r = np.nan
+    avg_loss_r = np.nan
     if 'R_multiple' in trades_df.columns:
         exp_r = float(trades_df['R_multiple'].mean())
+        win_r = trades_df.loc[trades_df['R_multiple'] > 0, 'R_multiple']
+        loss_r = trades_df.loc[trades_df['R_multiple'] < 0, 'R_multiple']
+        avg_win_r = float(win_r.mean()) if not win_r.empty else np.nan
+        avg_loss_r = float(loss_r.mean()) if not loss_r.empty else np.nan
+
+    med_hold = np.nan
+    if 'holding_days' in trades_df.columns and not trades_df['holding_days'].isna().all():
+        med_hold = float(trades_df['holding_days'].median())
+
+    med_mfe = np.nan
+    if 'MFE_R' in trades_df.columns and not trades_df['MFE_R'].isna().all():
+        med_mfe = float(trades_df['MFE_R'].median())
+
+    med_mae = np.nan
+    if 'MAE_R' in trades_df.columns and not trades_df['MAE_R'].isna().all():
+        med_mae = float(trades_df['MAE_R'].median())
 
     return {
         'ProfitFactor': float(pf),
         'WinRate': float(win_rate),
         'AvgWin': float(avg_win),
         'AvgLoss': float(avg_loss),
+        'AvgWin_R': float(avg_win_r) if np.isfinite(avg_win_r) else np.nan,
+        'AvgLoss_R': float(avg_loss_r) if np.isfinite(avg_loss_r) else np.nan,
         'Expectancy_R': float(exp_r) if np.isfinite(exp_r) else np.nan,
+        'MedianHoldDays': med_hold,
+        'MedianMFE_R': med_mfe,
+        'MedianMAE_R': med_mae,
     }
 
 
@@ -221,7 +249,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     symbols = cfg['symbols']
     regime_symbol = cfg['regime_symbol']
 
-    data = {s: normalize_ohlcv(df) for s, df in data.items()}
+    precomputed = bool(cfg.get('features_precomputed', False))
+    if precomputed:
+        data = {s: df.copy() for s, df in data.items()}
+    else:
+        data = {s: normalize_ohlcv(df) for s, df in data.items()}
 
     needed = set(symbols + [regime_symbol] + list(cfg.get('inverse_map', {}).values()))
     missing = sorted([s for s in needed if s not in data])
@@ -237,40 +269,58 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         if s in data:
             data[s] = data[s].reindex(idx)
 
-    # indicators
-    needed_list = sorted(list(needed))
-    total_syms = len(needed_list)
-    for j, s in enumerate(needed_list):
+    if not precomputed:
+        # indicators
+        needed_list = sorted(list(needed))
+        total_syms = len(needed_list)
+        for j, s in enumerate(needed_list):
+            if progress_cb is not None:
+                progress_cb(j, total_syms, f'Indicators: {j}/{total_syms} ({s})')
+
+            df = data[s]
+            if not df.index.equals(idx):
+                df = df.reindex(idx)
+                data[s] = df
+
+            df['ATR'] = atr(df, cfg['atr_period'])
+            df['ATR10'] = atr(df, 10)
+            df['ATR50'] = atr(df, 50)
+            df['ATR10_50_Ratio'] = df['ATR10'] / (df['ATR50'] + 1e-12)
+            df['ATR10_50_RatioPrev'] = df['ATR10_50_Ratio'].shift(1)
+            df['ATR10_50_RatioPrev2'] = df['ATR10_50_Ratio'].shift(2)
+            df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
+            df['SMA20'] = sma(df['Close'], 20)
+            df['SMA50'] = sma(df['Close'], 50)
+            df['SMA200'] = sma(df['Close'], 200)
+            df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
+            df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
+            df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
+            df['RangeLow10'] = df['Low'].shift(1).rolling(10).min()
+            df['RangeLow20'] = df['Low'].shift(1).rolling(20).min()
+            df['RangeHigh10'] = df['High'].shift(1).rolling(10).max()
+            df['DollarVol'] = dollar_volume(df)
+
+            mom_n = int(cfg.get('mom_lookback', 126))
+            df['Mom'] = pct_return(df['Close'], mom_n)
+
+            df['VolSMA50'] = sma(df['Volume'], 50)
+            df['VolSMA20'] = sma(df['Volume'], 20)
+            df['RelVol'] = df['Volume'] / (df['VolSMA50'] + 1e-12)
+            df['VolContracting20_50'] = df['VolSMA20'] < df['VolSMA50']
+
+            reg_close = data[regime_symbol]['Close']
+            df['RS63'] = pct_return(df['Close'], 63) - pct_return(reg_close, 63)
+            df['RS126'] = pct_return(df['Close'], 126) - pct_return(reg_close, 126)
+
+            rsi_p = int(cfg.get('rsi_period', 0))
+            if rsi_p > 0:
+                df['RSI'] = rsi(df['Close'], rsi_p)
+
+            if bool(cfg.get('enable_cwh', True)):
+                data[s] = detect_cup_handle(df, cfg)
+
         if progress_cb is not None:
-            progress_cb(j, total_syms, f'Indicators: {j}/{total_syms} ({s})')
-
-        df = data[s]
-        if not df.index.equals(idx):
-            df = df.reindex(idx)
-            data[s] = df
-
-        df['ATR'] = atr(df, cfg['atr_period'])
-        df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
-        df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
-        df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
-        df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
-        df['DollarVol'] = dollar_volume(df)
-
-        mom_n = int(cfg.get('mom_lookback', 126))
-        df['Mom'] = pct_return(df['Close'], mom_n)
-
-        df['VolSMA50'] = sma(df['Volume'], 50)
-        df['VolSMA20'] = sma(df['Volume'], 20)
-
-        rsi_p = int(cfg.get('rsi_period', 0))
-        if rsi_p > 0:
-            df['RSI'] = rsi(df['Close'], rsi_p)
-
-        if bool(cfg.get('enable_cwh', True)):
-            data[s] = detect_cup_handle(df, cfg)
-
-    if progress_cb is not None:
-        progress_cb(total_syms, total_syms, f'Indicators: {total_syms}/{total_syms} (done)')
+            progress_cb(total_syms, total_syms, f'Indicators: {total_syms}/{total_syms} (done)')
 
     reg = data[regime_symbol]
     reg['RiskOn'] = reg['Close'] > reg['SMA_regime']
@@ -295,15 +345,39 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     rsi_max_cfg = float(cfg.get('rsi_max', 100))
     max_ext = float(cfg.get('max_breakout_extension_atr', 1e9))
     min_bvm = float(cfg.get('min_breakout_vol_mult', 0.0))
+    min_rel_vol = float(cfg.get('min_rel_volume', min_bvm))
     corr_lookback = int(cfg.get('corr_lookback_days', 60))
     max_corr = float(cfg.get('max_pair_corr', 1.0))
     sector_map = cfg.get('sector_map', {})
     max_per_sector = int(cfg.get('max_positions_per_sector', 999))
+    require_vol_contraction = bool(cfg.get('require_volume_contraction', False))
+
+    enable_pullback = bool(cfg.get('enable_pullback_entry', False))
+    pullback_sma_tol_atr = float(cfg.get('pullback_sma_tolerance_atr', 0.5))
+    pullback_range_tol_atr = float(cfg.get('pullback_range_tolerance_atr', 0.5))
+    pullback_invalidation_atr = float(cfg.get('pullback_invalidation_atr', 1.0))
+
+    enable_vcp = bool(cfg.get('enable_vcp_entry', False))
+    vcp_atr_ratio_max = float(cfg.get('vcp_atr_ratio_max', 1.0))
+    vcp_range_frac_max = float(cfg.get('vcp_range_frac_max', 0.08))
+    vcp_close_pos_min = float(cfg.get('vcp_close_pos_min', 0.7))
+
+    enable_rs = bool(cfg.get('enable_relative_strength_filter', False))
+    rs63_min = float(cfg.get('rs63_min', -1e9))
+    rs126_min = float(cfg.get('rs126_min', -1e9))
+
+    entry_mode = str(cfg.get('entry_mode', 'legacy')).strip().lower()
+    allow_breakout = entry_mode in {'legacy', 'breakout_only', 'breakout_plus_pullback', 'breakout_plus_vcp'}
+    allow_pullback = (entry_mode == 'legacy' and enable_pullback) or (entry_mode in {'pullback_only', 'breakout_plus_pullback'})
+    allow_vcp = (entry_mode == 'legacy' and enable_vcp) or (entry_mode in {'vcp_only', 'breakout_plus_vcp'})
 
     def mark_to_market(date):
         eq = cash
         for p in open_positions:
-            px = data[p['symbol']].loc[date, 'Close']
+            df_sym = data[p['symbol']]
+            if date not in df_sym.index:
+                continue
+            px = df_sym.loc[date, 'Close']
             if pd.isna(px):
                 continue
             eq += p['shares'] * float(px)
@@ -314,7 +388,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         return wd == int(cfg.get('weekly_rebalance_weekday', 0))
 
     def score_candidate(sym: str, date: pd.Timestamp) -> float:
-        row = data[sym].loc[date]
+        df_sym = data[sym]
+        if date not in df_sym.index:
+            return -np.inf
+        row = df_sym.loc[date]
         if pd.isna(row.get('ATR')) or float(row['ATR']) <= 0:
             return -np.inf
 
@@ -346,6 +423,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         new_open = []
         for p in open_positions:
             df = data[p['symbol']]
+            if date not in df.index:
+                new_open.append(p)
+                continue
             h = df.loc[date, 'High']
             l = df.loc[date, 'Low']
             c = df.loc[date, 'Close']
@@ -356,6 +436,13 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
             h = float(h)
             l = float(l)
             c = float(c)
+
+            initial_risk_per_share = float(p.get('initial_risk_per_share', np.nan))
+            if np.isfinite(initial_risk_per_share) and initial_risk_per_share > 0:
+                mfe_r = float((h - p['entry_px']) / initial_risk_per_share)
+                mae_r = float((l - p['entry_px']) / initial_risk_per_share)
+                p['MFE_R'] = float(max(p.get('MFE_R', 0.0), mfe_r))
+                p['MAE_R'] = float(min(p.get('MAE_R', 0.0), mae_r))
 
             if use_trailing:
                 atr_raw = df.loc[date, 'ATR']
@@ -387,7 +474,6 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
             exit_px_eff = exit_px * (1 - spread)
             cash += p['shares'] * exit_px_eff
 
-            initial_risk_per_share = float(p.get('initial_risk_per_share', np.nan))
             r_mult = np.nan
             if np.isfinite(initial_risk_per_share) and initial_risk_per_share > 0:
                 r_mult = float((exit_px_eff - p['entry_px']) / initial_risk_per_share)
@@ -406,13 +492,19 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     'setup': p.get('setup', 'BREAKOUT'),
                     'initial_risk_per_share': initial_risk_per_share,
                     'R_multiple': r_mult,
+                    'holding_days': int(max(0, i - int(p.get('entry_i', i)))),
+                    'MFE_R': float(p.get('MFE_R', np.nan)),
+                    'MAE_R': float(p.get('MAE_R', np.nan)),
                 }
             )
 
         open_positions = new_open
 
         eq_today = mark_to_market(date)
-        equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash, 'OpenPositions': len(open_positions)})
+        exposure = np.nan
+        if np.isfinite(eq_today) and abs(eq_today) > 1e-12:
+            exposure = float((eq_today - cash) / eq_today)
+        equity_rows.append({'Date': date, 'Equity': eq_today, 'Cash': cash, 'OpenPositions': len(open_positions), 'Exposure': exposure})
 
         risk_on = bool(reg.loc[date, 'RiskOn']) if not pd.isna(reg.loc[date, 'RiskOn']) else False
 
@@ -427,10 +519,14 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
             new_open = []
             for p in open_positions:
+                df_p = data[p['symbol']]
+                if date not in df_p.index:
+                    new_open.append(p)
+                    continue
                 if p['symbol'] in keep_syms:
                     new_open.append(p)
                     continue
-                c = data[p['symbol']].loc[date, 'Close']
+                c = df_p.loc[date, 'Close']
                 if pd.isna(c):
                     new_open.append(p)
                     continue
@@ -456,6 +552,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                         'setup': p.get('setup', 'BREAKOUT'),
                         'initial_risk_per_share': initial_risk_per_share,
                         'R_multiple': r_mult,
+                        'holding_days': int(max(0, i - int(p.get('entry_i', i)))),
+                        'MFE_R': float(p.get('MFE_R', np.nan)),
+                        'MAE_R': float(p.get('MAE_R', np.nan)),
                     }
                 )
             open_positions = new_open
@@ -473,7 +572,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         candidates = []
         if risk_on:
             for sym in symbols:
-                row = data[sym].loc[date]
+                df_sym = data[sym]
+                if date not in df_sym.index:
+                    continue
+                row = df_sym.loc[date]
                 if pd.isna(row.get('ATR')) or pd.isna(row.get('Close')):
                     continue
                 if float(row['Close']) < cfg['min_price']:
@@ -483,8 +585,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     continue
 
                 setup = None
+                setup_meta = {}
                 piv = row.get('PivotClose') if bl_source == 'close' else row.get('HH')
-                if piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
+                if allow_breakout and piv is not None and (not pd.isna(piv)) and (float(row['Close']) > float(piv)):
                     setup = 'BREAKOUT'
                     # Consecutive-close confirmation
                     if confirm >= 2:
@@ -494,7 +597,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                                 confirmed = False
                                 break
                             prev_d = idx[i - k]
-                            pr = data[sym].loc[prev_d]
+                            if prev_d not in df_sym.index:
+                                confirmed = False
+                                break
+                            pr = df_sym.loc[prev_d]
                             prev_bl = pr.get('PivotClose') if bl_source == 'close' else pr.get('HH')
                             if pd.isna(prev_bl) or float(pr['Close']) <= float(prev_bl):
                                 confirmed = False
@@ -516,14 +622,85 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                         if pd.isna(rsi_val) or float(rsi_val) > rsi_max_cfg:
                             setup = None
                     # Volume confirmation
-                    if setup is not None and min_bvm > 0:
-                        vol = row.get('Volume')
-                        vsma50 = row.get('VolSMA50')
-                        if pd.isna(vol) or pd.isna(vsma50) or float(vsma50) <= 0 or float(vol) < min_bvm * float(vsma50):
+                    if setup is not None and min_rel_vol > 0:
+                        rel_vol = row.get('RelVol')
+                        if pd.isna(rel_vol) or float(rel_vol) < min_rel_vol:
                             setup = None
+                    if setup is not None and require_vol_contraction:
+                        vc = row.get('VolContracting20_50')
+                        if pd.isna(vc) or (not bool(vc)):
+                            setup = None
+
+                if setup is None and allow_pullback:
+                    atr_val = row.get('ATR')
+                    sma20_v = row.get('SMA20')
+                    sma50_v = row.get('SMA50')
+                    sma200_v = row.get('SMA200')
+                    mom_v = row.get('Mom')
+                    low10_v = row.get('RangeLow10')
+                    low20_v = row.get('RangeLow20')
+                    close_v = row.get('Close')
+                    if (
+                        atr_val is not None and (not pd.isna(atr_val)) and float(atr_val) > 0
+                        and sma20_v is not None and (not pd.isna(sma20_v))
+                        and sma50_v is not None and (not pd.isna(sma50_v))
+                        and sma200_v is not None and (not pd.isna(sma200_v))
+                        and mom_v is not None and (not pd.isna(mom_v))
+                    ):
+                        atr_f = float(atr_val)
+                        close_f = float(close_v)
+                        sma20_f = float(sma20_v)
+                        low_ref = np.nan
+                        if (low10_v is not None) and (not pd.isna(low10_v)):
+                            low_ref = float(low10_v)
+                        if (low20_v is not None) and (not pd.isna(low20_v)):
+                            low_ref = min(low_ref, float(low20_v)) if np.isfinite(low_ref) else float(low20_v)
+                        near_sma20 = abs(close_f - sma20_f) <= pullback_sma_tol_atr * atr_f
+                        near_range_low = np.isfinite(low_ref) and (close_f >= low_ref) and ((close_f - low_ref) <= pullback_range_tol_atr * atr_f)
+                        trend_ok = (close_f > float(sma200_v)) and (float(sma50_v) > float(sma200_v)) and (float(mom_v) > 0.0)
+                        if trend_ok and (near_sma20 or near_range_low):
+                            setup = 'PULLBACK'
+                            if near_range_low and np.isfinite(low_ref):
+                                setup_meta['pullback_invalidation_ref'] = float(low_ref)
+                            else:
+                                setup_meta['pullback_invalidation_ref'] = float(sma20_f)
+
+                if setup is None and allow_vcp:
+                    ratio_now = row.get('ATR10_50_RatioPrev')
+                    rh = row.get('RangeHigh10')
+                    rl = row.get('RangeLow10')
+                    close_v = row.get('Close')
+                    ratio_prev = row.get('ATR10_50_RatioPrev2')
+                    if (
+                        ratio_now is not None and (not pd.isna(ratio_now))
+                        and rh is not None and (not pd.isna(rh))
+                        and rl is not None and (not pd.isna(rl))
+                        and close_v is not None and (not pd.isna(close_v))
+                        and float(rh) > float(rl)
+                        and float(close_v) > 0
+                    ):
+                        range_frac = (float(rh) - float(rl)) / float(close_v)
+                        close_pos = (float(close_v) - float(rl)) / max(1e-12, float(rh) - float(rl))
+                        ratio_prev_f = float(ratio_prev) if (ratio_prev is not None and not pd.isna(ratio_prev)) else np.inf
+                        if (
+                            float(ratio_now) <= vcp_atr_ratio_max
+                            and float(ratio_now) < ratio_prev_f
+                            and range_frac <= vcp_range_frac_max
+                            and close_pos >= vcp_close_pos_min
+                        ):
+                            setup = 'VCP'
 
                 if bool(cfg.get('enable_cwh', True)) and bool(row.get('CWH_Signal', False)):
                     setup = 'CUP_HANDLE'
+
+                if setup is not None and enable_rs:
+                    rs63 = row.get('RS63')
+                    rs126 = row.get('RS126')
+                    if (
+                        rs63 is None or pd.isna(rs63) or float(rs63) < rs63_min
+                        or rs126 is None or pd.isna(rs126) or float(rs126) < rs126_min
+                    ):
+                        setup = None
 
                 if setup is None:
                     continue
@@ -532,7 +709,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                 if setup == 'CUP_HANDLE' and bool(row.get('CWH_VolOK', False)):
                     sc += float(cfg.get('cwh_vol_bonus', 0.3))
 
-                candidates.append((sym, sc, setup))
+                candidates.append((sym, sc, setup, setup_meta))
 
         if not candidates:
             continue
@@ -541,8 +718,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         n_new = min(cfg['max_new_trades_per_day'], cfg['max_positions'] - len(open_positions))
         picks = candidates[:n_new]
 
-        for sym, _, setup in picks:
-            o = data[sym].loc[next_date, 'Open']
+        for sym, _, setup, setup_meta in picks:
+            df_sym = data[sym]
+            if next_date not in df_sym.index:
+                continue
+            o = df_sym.loc[next_date, 'Open']
             if pd.isna(o):
                 continue
             entry_px = float(o)
@@ -550,7 +730,7 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                 continue
 
             entry_px_eff = entry_px * (1 + spread)
-            atr_raw = data[sym].loc[date, 'ATR']
+            atr_raw = df_sym.loc[date, 'ATR']
             if pd.isna(atr_raw):
                 continue
             atr_v = float(atr_raw)
@@ -561,9 +741,16 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
 
             stop = entry_px_eff - stop_dist
             if setup == 'CUP_HANDLE':
-                hl = data[sym].loc[date].get('CWH_HandleLow')
+                hl = df_sym.loc[date].get('CWH_HandleLow')
                 if hl is not None and not pd.isna(hl) and float(hl) > 0:
                     stop = min(stop, float(hl))
+            elif setup == 'PULLBACK':
+                inv_ref = setup_meta.get('pullback_invalidation_ref', np.nan)
+                if np.isfinite(inv_ref):
+                    stop = min(stop, float(inv_ref) - pullback_invalidation_atr * atr_v)
+
+            if stop >= entry_px_eff:
+                continue
 
             tp = None
             if not use_trailing:
@@ -620,6 +807,9 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                     'setup': setup,
                     'initial_risk_per_share': float(entry_px_eff - float(stop)),
                     'peak_high': float(entry_px),
+                    'entry_i': i + 1,
+                    'MFE_R': 0.0,
+                    'MAE_R': 0.0,
                 }
             )
 
@@ -631,10 +821,24 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     cagr = (eq.iloc[-1] / eq.iloc[0]) ** (252 / max(1, len(eq) - 1)) - 1
     vol = ret.std() * np.sqrt(252)
     sharpe = (ret.mean() * 252) / (ret.std() * np.sqrt(252) + 1e-12)
+    downside = ret[ret < 0]
+    downside_vol = downside.std() * np.sqrt(252)
+    sortino = (ret.mean() * 252) / (downside_vol + 1e-12)
     dd = (eq / eq.cummax() - 1)
     max_dd = dd.min()
 
     stats = compute_trade_stats(trades_df)
+    exposure_avg = np.nan
+    if 'Exposure' in equity_df.columns and not equity_df.empty:
+        exp_series = equity_df['Exposure'].dropna()
+        exposure_avg = float(exp_series.mean()) if not exp_series.empty else np.nan
+    turnover = np.nan
+    if trades_df is not None and not trades_df.empty:
+        notional = (trades_df['entry_px'] * trades_df['shares']).abs() + (trades_df['exit_px'] * trades_df['shares']).abs()
+        avg_equity = float(eq.mean()) if len(eq) else np.nan
+        if np.isfinite(avg_equity) and avg_equity > 0:
+            years = max(len(eq) / 252.0, 1.0 / 252.0)
+            turnover = float((notional.sum() / avg_equity) / years)
 
     summary = {
         'start': str(eq.index.min().date()),
@@ -644,7 +848,10 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         'CAGR': float(cagr),
         'Volatility': float(vol),
         'Sharpe_approx': float(sharpe),
+        'Sortino_approx': float(sortino),
         'MaxDrawdown': float(max_dd),
+        'Exposure': exposure_avg,
+        'Turnover': turnover,
         'Trades': int(len(trades_df)),
         **stats,
     }
