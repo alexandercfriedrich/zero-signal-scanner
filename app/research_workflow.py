@@ -2,11 +2,13 @@ import argparse
 import hashlib
 import json
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 from pandas.tseries.offsets import BDay
 
@@ -63,13 +65,25 @@ class RunResult:
 
 
 def load_sp500_symbols() -> list[str]:
-    tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+    resp = requests.get(
+        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    tables = pd.read_html(StringIO(resp.text))
     syms = tables[0]["Symbol"].astype(str).str.strip().tolist()
     return [s.replace(".", "-") for s in syms]
 
 
 def load_nasdaq100_symbols() -> list[str]:
-    tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+    resp = requests.get(
+        "https://en.wikipedia.org/wiki/Nasdaq-100",
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    tables = pd.read_html(StringIO(resp.text))
     frame = None
     for t in tables:
         cols = {str(c).strip().lower() for c in t.columns}
@@ -168,7 +182,7 @@ def download_data(symbols: list[str], start: str, end: str, chunk_size: int = 80
             auto_adjust=False,
             progress=False,
             group_by="column",
-            threads=True,
+            threads=False,
         )
         normalized = _normalize_downloaded(raw, batch)
         out.update({k: v for k, v in normalized.items() if isinstance(v, pd.DataFrame) and not v.empty})
@@ -486,14 +500,23 @@ def run_one_variant(
 ) -> RunResult:
     cfg = dict(baseline_cfg)
     cfg.update(variant["overrides"])
+    available = set(data_window.keys())
+    symbols_run = [s for s in symbols if s in available and s != benchmark]
+    inverse_map = cfg.get("inverse_map", {}) if isinstance(cfg.get("inverse_map", {}), dict) else {}
+    inverse_map = {k: v for k, v in inverse_map.items() if v in available}
     cfg.update({
         "start": warmup_start,
         "end": split_end,
-        "symbols": symbols,
+        "symbols": symbols_run,
         "regime_symbol": benchmark,
+        "inverse_map": inverse_map,
     })
 
-    eq, trades, _, _ = run_backtest(data_window, cfg)
+    if benchmark not in available or not symbols_run:
+        eq = pd.DataFrame()
+        trades = pd.DataFrame()
+    else:
+        eq, trades, _, _ = run_backtest(data_window, cfg)
     split_ts = pd.Timestamp(split_start)
     eq_eval = eq.loc[eq.index >= split_ts].copy()
     trades_eval = filter_trades_from_start(trades, split_start)
