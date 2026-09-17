@@ -142,7 +142,14 @@ def load_sp500_symbols() -> list[str]:
 
 def load_nasdaq100_symbols() -> list[str]:
     tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-    frame = tables[4]
+    frame = None
+    for t in tables:
+        cols = {str(c).strip().lower() for c in t.columns}
+        if "ticker" in cols and len(t) >= 50:
+            frame = t
+            break
+    if frame is None:
+        frame = tables[4]
     sym_col = "Ticker" if "Ticker" in frame.columns else frame.columns[1]
     syms = frame[sym_col].astype(str).str.strip().tolist()
     return [s.replace(".", "-") for s in syms]
@@ -279,37 +286,53 @@ def main() -> None:
     all_results: list[RunResult] = []
     all_trades: list[pd.DataFrame] = []
 
+    # Phase 1: In-sample runs for all universes (variant selection only from IS)
+    in_sample_results: list[RunResult] = []
+    split_is, start_is, end_is = SPLITS[0]
     for uni in universes:
         bench = "SPY" if uni == "sp500" else "QQQ"
-        current_results: list[RunResult] = []
+        syms, survivorship_biased = symbols_for(uni, split_is, pit_df)
+        run_symbols = sorted(set(syms + [bench]))
+        data = download_data(run_symbols, start_is, end_is)
+        syms_in_data = [s for s in syms if s in data]
+        if bench not in data or not syms_in_data:
+            continue
+        for variant in VARIANTS:
+            res = run_one_variant(uni, split_is, start_is, end_is, bench, syms_in_data, variant, data, survivorship_biased)
+            in_sample_results.append(res)
+            all_results.append(res)
+            if res.trades_df is not None and not res.trades_df.empty:
+                t = res.trades_df.copy()
+                t.insert(0, "variant_id", res.variant_id)
+                t.insert(0, "split", res.split)
+                t.insert(0, "universe", res.universe)
+                all_trades.append(t)
 
-        for split, start, end in SPLITS:
+    # Select one variant per family from IS (aggregated across selected universes)
+    selected_ids: set[str] = set()
+    for fam in ["A", "B", "C", "D", "E"]:
+        fam_runs = [r for r in in_sample_results if r.family == fam]
+        if not fam_runs:
+            continue
+        score_df = pd.DataFrame([{"variant_id": r.variant_id, "score": score_for_selection(r.summary)} for r in fam_runs])
+        best_id = score_df.groupby("variant_id", dropna=False)["score"].mean().sort_values(ascending=False).index[0]
+        selected_ids.add(str(best_id))
+
+    # Phase 2: OOS runs using only baseline + selected IS winners
+    oos_variants = [{"id": "baseline", "family": "baseline", "label": "55d Breakout Baseline", "overrides": {}}]
+    oos_variants += [v for v in VARIANTS if v["id"] in selected_ids]
+
+    for uni in universes:
+        bench = "SPY" if uni == "sp500" else "QQQ"
+        for split, start, end in SPLITS[1:]:
             syms, survivorship_biased = symbols_for(uni, split, pit_df)
             run_symbols = sorted(set(syms + [bench]))
             data = download_data(run_symbols, start, end)
             syms_in_data = [s for s in syms if s in data]
             if bench not in data or not syms_in_data:
                 continue
-
-            is_split = split == "in_sample"
-            variants_to_run = VARIANTS if is_split else [{"id": "baseline", "family": "baseline", "label": "55d Breakout Baseline", "overrides": {}}]
-            if not is_split:
-                chosen = pd.DataFrame(
-                    [{"family": r.family, "id": r.variant_id} for r in current_results if r.split == "in_sample"]
-                )
-                if not chosen.empty:
-                    best_ids = []
-                    for fam in ["A", "B", "C", "D", "E"]:
-                        fam_runs = [r for r in current_results if r.split == "in_sample" and r.family == fam]
-                        if fam_runs:
-                            best = max(fam_runs, key=lambda r: score_for_selection(r.summary))
-                            best_ids.append(best.variant_id)
-                    extra = [v for v in VARIANTS if v["id"] in set(best_ids)]
-                    variants_to_run = variants_to_run + extra
-
-            for variant in variants_to_run:
+            for variant in oos_variants:
                 res = run_one_variant(uni, split, start, end, bench, syms_in_data, variant, data, survivorship_biased)
-                current_results.append(res)
                 all_results.append(res)
                 if res.trades_df is not None and not res.trades_df.empty:
                     t = res.trades_df.copy()
@@ -354,7 +377,7 @@ def main() -> None:
         "## Daten-/Zeit-Splits",
         "- In-Sample: 2011-2018 (nur Parameterauswahl)",
         "- OOS-1: 2019-2022",
-        "- OOS-2: 2023-2026 bis letzter verfügbarer Handelstag",
+        "- OOS-2: ab 2023 bis letzter verfügbarer Handelstag",
         "",
         "## Survivorship-Bias Hinweis",
     ]

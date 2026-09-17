@@ -801,7 +801,8 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         notional = (trades_df['entry_px'] * trades_df['shares']).abs() + (trades_df['exit_px'] * trades_df['shares']).abs()
         avg_equity = float(eq.mean()) if len(eq) else np.nan
         if np.isfinite(avg_equity) and avg_equity > 0:
-            turnover = float(notional.sum() / avg_equity)
+            years = max(len(eq) / 252.0, 1.0 / 252.0)
+            turnover = float((notional.sum() / avg_equity) / years)
 
     summary = {
         'start': str(eq.index.min().date()),

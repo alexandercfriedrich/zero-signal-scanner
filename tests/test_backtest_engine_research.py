@@ -123,9 +123,11 @@ class BacktestResearchTests(unittest.TestCase):
         self.assertIn("Exposure", summary)
         self.assertIn("Turnover", summary)
         self.assertIn("MedianHoldDays", summary)
-        if not trades.empty:
-            self.assertIn("MFE_R", trades.columns)
-            self.assertIn("MAE_R", trades.columns)
+        self.assertGreaterEqual(int(summary.get("Trades", 0)), 1)
+        self.assertTrue(np.isfinite(float(summary["Exposure"])))
+        self.assertTrue(np.isfinite(float(summary["Turnover"])))
+        self.assertIn("MFE_R", trades.columns)
+        self.assertIn("MAE_R", trades.columns)
 
 
 if __name__ == "__main__":
