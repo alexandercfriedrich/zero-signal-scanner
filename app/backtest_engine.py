@@ -281,6 +281,8 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         df['ATR10'] = atr(df, 10)
         df['ATR50'] = atr(df, 50)
         df['ATR10_50_Ratio'] = df['ATR10'] / (df['ATR50'] + 1e-12)
+        df['ATR10_50_RatioPrev'] = df['ATR10_50_Ratio'].shift(1)
+        df['ATR10_50_RatioPrev2'] = df['ATR10_50_Ratio'].shift(2)
         df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
         df['SMA20'] = sma(df['Close'], 20)
         df['SMA50'] = sma(df['Close'], 50)
@@ -635,13 +637,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
                                 setup_meta['pullback_invalidation_ref'] = float(sma20_f)
 
                 if setup is None and enable_vcp:
-                    ratio_now = row.get('ATR10_50_Ratio')
+                    ratio_now = row.get('ATR10_50_RatioPrev')
                     rh = row.get('RangeHigh10')
                     rl = row.get('RangeLow10')
                     close_v = row.get('Close')
-                    ratio_prev = np.nan
-                    if i > 0:
-                        ratio_prev = data[sym].loc[idx[i - 1], 'ATR10_50_Ratio']
+                    ratio_prev = row.get('ATR10_50_RatioPrev2')
                     if (
                         ratio_now is not None and (not pd.isna(ratio_now))
                         and rh is not None and (not pd.isna(rh))

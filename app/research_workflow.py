@@ -202,11 +202,13 @@ def score_for_selection(summary: dict[str, Any]) -> float:
     return s
 
 
-def select_family_winners(in_sample_results: list[RunResult]) -> set[str]:
+def select_family_winners(in_sample_results: list[RunResult], universe: str | None = None) -> set[str]:
     selected_ids: set[str] = set()
     for fam in ["A", "B", "C", "D", "E"]:
         fam_rows = []
         for r in in_sample_results:
+            if universe is not None and r.universe != universe:
+                continue
             if r.family != fam:
                 continue
             sc = score_for_selection(r.summary)
@@ -300,6 +302,13 @@ def evaluate_acceptance(result_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def dataframe_to_markdown(df: pd.DataFrame) -> str:
+    try:
+        return df.to_markdown(index=False)
+    except ImportError:
+        return df.to_string(index=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reproduzierbarer Research-/Backtest-Workflow")
     parser.add_argument("--output-dir", default="research_outputs")
@@ -338,15 +347,13 @@ def main() -> None:
                 t.insert(0, "universe", res.universe)
                 all_trades.append(t)
 
-    # Select one variant per family from IS (aggregated across selected universes)
-    selected_ids = select_family_winners(in_sample_results)
-
-    # Phase 2: OOS runs using only baseline + selected IS winners
-    oos_variants = [{"id": "baseline", "family": "baseline", "label": "55d Breakout Baseline", "overrides": {}}]
-    oos_variants += [v for v in VARIANTS if v["id"] in selected_ids]
+    # Select one IS winner per (universe, family)
+    selected_ids_by_universe = {uni: select_family_winners(in_sample_results, universe=uni) for uni in universes}
 
     for uni in universes:
         bench = "SPY" if uni == "sp500" else "QQQ"
+        oos_variants = [{"id": "baseline", "family": "baseline", "label": "55d Breakout Baseline", "overrides": {}}]
+        oos_variants += [v for v in VARIANTS if v["id"] in selected_ids_by_universe.get(uni, set())]
         for split, start, end in SPLITS[1:]:
             syms, survivorship_biased = symbols_for(uni, split, pit_df)
             run_symbols = sorted(set(syms + [bench]))
@@ -421,14 +428,14 @@ def main() -> None:
             "Benchmark_CAGR", "Benchmark_Sortino",
         ]
         cols = [c for c in show_cols if c in summary_df.columns]
-        md_lines.append(summary_df[cols].to_markdown(index=False))
+        md_lines.append(dataframe_to_markdown(summary_df[cols]))
 
     md_lines.append("")
     md_lines.append("## Optimierungs-Akzeptanz (beide OOS)")
     if confirm_df.empty:
         md_lines.append("Keine bestätigbaren Varianten.")
     else:
-        md_lines.append(confirm_df.to_markdown(index=False))
+        md_lines.append(dataframe_to_markdown(confirm_df))
 
     (out_dir / "research_report.md").write_text("\n".join(md_lines), encoding="utf-8")
 
