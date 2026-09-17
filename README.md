@@ -40,7 +40,9 @@ python research_workflow.py \
   --universe both \
   --as-of 2026-09-17 \
   --warmup-bdays 300 \
-  --baseline-config ./config_best_2011_2026.json
+  --baseline-config ./config_best_2011_2026.json \
+  --cache-dir ~/.zero_swing_cache/market_data/v1 \
+  --full-research
 ```
 
 Optional mit Point-in-Time-Konstituenten (verringert Survivorship-Bias):
@@ -98,3 +100,30 @@ Eine Variante gilt nur dann als bestätigt, wenn sie in **beiden** OOS-Perioden 
 ### Datenhinweis / Einschränkung
 
 Für belastbare historische Aussagen reichen PIT-Mitgliedschaften alleine nicht aus: zusätzlich sind delistingbereinigte historische Preisreihen notwendig. Läufe auf heutigen Wikipedia-Bestandteilen mit Yahoo-Daten werden in den Outputs als `survivorship_biased=true` markiert und dürfen nicht als belastbarer Performance-Nachweis interpretiert werden.
+
+### Persistenter, inkrementeller Kursdaten-Cache (Research)
+
+- CLI-Optionen:
+  - `--cache-dir` (Default: `~/.zero_swing_cache/market_data/v1`)
+  - `--refresh` (Cache ignorieren und vollständig neu laden)
+  - `--no-cache` (kein Lesen/Schreiben des Caches)
+  - `--cache-overlap-bdays` (Default: `5`)
+- Cache-Strategie:
+  - erster Lauf: vollständiger Download des angeforderten Zeitraums
+  - Folgelauf: nur fehlendes Präfix/Suffix laden; Suffix mit 5 Handelstagen Sicherheits-Overlap
+  - Zusammenführung immer dedupliziert nach Datum, sortiert
+- Speicher/Metadaten:
+  - bevorzugt Parquet, CSV-Fallback
+  - atomische Writes (Temp-Datei + Rename)
+  - Manifest: `research_price_manifest.json` im Cache-Verzeichnis
+- Report-Ausgabe enthält Cache-Nutzung und Datenbereiche je Symbol in `cache_usage.csv` und im Markdown-Report.
+
+### Smoke-Test vs. Full-Research
+
+- Smoke-Test (CI-/Agent-tauglich, **keine** Performance-Bestätigung):
+  - `--smoke-test --max-symbols-per-universe 25`
+  - Report-Markierung: `SMOKE TEST — NOT A PERFORMANCE VALIDATION`
+  - Es werden keine Varianten als bestätigt ausgewiesen.
+- Full-Research:
+  - `--full-research` für vollständige Universen/Sensitivitätsauswertung
+  - nicht für kurze Agent-Timeout-Läufe gedacht.

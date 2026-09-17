@@ -160,18 +160,127 @@ class ResearchWorkflowTests(unittest.TestCase):
                 {"id": "baseline", "family": "baseline", "label": "Baseline", "overrides": {"entry_mode": "breakout_only"}},
                 {"id": "sens_ext_0.50", "family": "sens_ext", "label": "sens", "overrides": {"entry_mode": "breakout_only"}},
             ]
+            idx = pd.bdate_range("2010-01-01", periods=300)
+            mk = lambda: pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": np.linspace(1, 2, len(idx)), "Adj Close": np.linspace(1, 2, len(idx)), "Volume": 1000}, index=idx)
             with patch.object(rw, "build_variants", return_value=fake_variants), \
                  patch.object(rw, "symbols_for", return_value=(["AAA"], True)), \
-                 patch.object(rw, "download_data", return_value={"AAA": pd.DataFrame({"Close": [1.0]}, index=pd.bdate_range("2010-01-01", periods=1)), "SPY": pd.DataFrame({"Close": [1.0]}, index=pd.bdate_range("2010-01-01", periods=1))}), \
-                 patch.object(rw, "run_one_variant", side_effect=fake_run_one_variant), \
-                 patch.object(rw, "read_baseline_config", return_value=({}, "app/config_best_2011_2026.json", "abc")), \
-                 patch.object(sys, "argv", ["research_workflow.py", "--output-dir", td, "--universe", "sp500", "--as-of", "2026-09-17"]):
-                rw.main()
+                 patch.object(rw, "download_data", return_value=(
+                    {"AAA": mk(), "SPY": mk()},
+                    {"AAA": {"cache_hit": True, "download_rows": 0}, "SPY": {"cache_hit": True, "download_rows": 0}}
+                )), \
+                patch.object(rw, "run_one_variant", side_effect=fake_run_one_variant), \
+                patch.object(rw, "read_baseline_config", return_value=({}, "app/config_best_2011_2026.json", "abc")), \
+                patch.object(sys, "argv", ["research_workflow.py", "--output-dir", td, "--universe", "sp500", "--as-of", "2026-09-17"]):
+               rw.main()
 
             self.assertTrue((Path(td) / "research_summary.csv").exists())
             self.assertTrue((Path(td) / "research_trades.csv").exists())
             self.assertTrue((Path(td) / "optimization_confirmation.csv").exists())
             self.assertTrue((Path(td) / "research_report.md").exists())
+            self.assertTrue((Path(td) / "cache_usage.csv").exists())
+
+    def test_overlapping_symbols_downloaded_once_in_both_universe_mode(self):
+        captured = {}
+
+        def fake_symbols_for(universe, split, pit_df):
+            if universe == "sp500":
+                return (["AAPL", "MSFT", "NVDA"], True)
+            return (["MSFT", "NVDA", "TSLA"], True)
+
+        def fake_download(cache, symbols, start, end):
+            captured["symbols"] = list(symbols)
+            idx = pd.bdate_range("2010-01-01", periods=400)
+            mk = lambda: pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": np.linspace(1, 2, len(idx)), "Adj Close": np.linspace(1, 2, len(idx)), "Volume": 1000}, index=idx)
+            data = {s: mk() for s in symbols}
+            infos = {s: {"cache_hit": True, "download_rows": 0} for s in symbols}
+            return data, infos
+
+        def fake_run_one_variant(**kwargs):
+            v = kwargs["variant"]
+            return RunResult(
+                universe=kwargs["universe"],
+                split=kwargs["split"],
+                variant_id=v["id"],
+                variant_label=v["label"],
+                family=v["family"],
+                summary={"Trades": 0, "Sortino_approx": np.nan, "Expectancy_R": np.nan, "MaxDrawdown": np.nan},
+                trades_df=pd.DataFrame(),
+                survivorship_biased=True,
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(rw, "symbols_for", side_effect=fake_symbols_for), \
+                 patch.object(rw, "download_data", side_effect=fake_download), \
+            patch.object(rw, "run_one_variant", side_effect=fake_run_one_variant), \
+            patch.object(rw, "read_baseline_config", return_value=({}, "app/config_best_2011_2026.json", "abc")), \
+            patch.object(sys, "argv", ["research_workflow.py", "--output-dir", td, "--universe", "both", "--smoke-test"]):
+                rw.main()
+
+            syms = captured["symbols"]
+            self.assertEqual(len(syms), len(set(syms)))
+            self.assertIn("SPY", syms)
+            self.assertIn("QQQ", syms)
+
+    def test_smoke_test_marked_and_never_confirms(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx = pd.bdate_range("2010-01-01", periods=400)
+            mk = lambda: pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": np.linspace(1, 2, len(idx)), "Adj Close": np.linspace(1, 2, len(idx)), "Volume": 1000}, index=idx)
+            def fake_run_one_variant(**kwargs):
+                v = kwargs["variant"]
+                return RunResult(
+                    universe=kwargs["universe"],
+                    split=kwargs["split"],
+                    variant_id=v["id"],
+                    variant_label=v["label"],
+                    family=v["family"],
+                    summary={"Trades": 10, "Sortino_approx": 0.1, "Expectancy_R": 0.01, "MaxDrawdown": -0.1},
+                    trades_df=pd.DataFrame(),
+                    survivorship_biased=True,
+                )
+            with patch.object(rw, "symbols_for", return_value=(["AAPL", "MSFT"], True)), \
+                 patch.object(rw, "download_data", return_value=({"AAPL": mk(), "MSFT": mk(), "SPY": mk(), "QQQ": mk()}, {"AAPL": {}, "MSFT": {}, "SPY": {}, "QQQ": {}})), \
+                 patch.object(rw, "run_one_variant", side_effect=fake_run_one_variant), \
+                 patch.object(rw, "read_baseline_config", return_value=({}, "app/config_best_2011_2026.json", "abc")), \
+                 patch.object(sys, "argv", ["research_workflow.py", "--output-dir", td, "--universe", "sp500", "--smoke-test"]):
+                rw.main()
+
+            report = (Path(td) / "research_report.md").read_text(encoding="utf-8")
+            self.assertIn("SMOKE TEST — NOT A PERFORMANCE VALIDATION", report)
+            conf = pd.read_csv(Path(td) / "optimization_confirmation.csv")
+            if not conf.empty:
+                self.assertFalse(conf["confirmed_in_both_oos"].astype(bool).any())
+
+    def test_run_one_variant_does_not_mutate_shared_features(self):
+        idx = pd.bdate_range("2020-01-01", periods=5)
+        base_df = pd.DataFrame({"Open": [1, 1, 1, 1, 1], "High": [1, 1, 1, 1, 1], "Low": [1, 1, 1, 1, 1], "Close": [1, 1, 1, 1, 1], "Adj Close": [1, 1, 1, 1, 1], "Volume": [1000] * 5}, index=idx)
+        prepared = {"AAA": base_df.copy(), "SPY": base_df.copy()}
+        prepared_before = prepared["AAA"]["Close"].copy()
+
+        def fake_run_backtest(data, cfg):
+            data["AAA"]["Close"] = 0.0
+            eq = pd.DataFrame({"Equity": [1000, 1001], "Exposure": [0.1, 0.2]}, index=pd.bdate_range("2020-01-02", periods=2))
+            tr = pd.DataFrame(columns=["entry_date", "entry_px", "exit_px", "shares", "pnl"])
+            return eq, tr, {}, {}
+
+        with patch.object(rw, "run_backtest", side_effect=fake_run_backtest):
+            rw.run_one_variant(
+                universe="sp500",
+                split="in_sample",
+                split_start="2020-01-02",
+                split_end="2020-01-10",
+                warmup_start="2020-01-01",
+                benchmark="SPY",
+                symbols=["AAA"],
+                variant={"id": "baseline", "label": "Baseline", "family": "baseline", "overrides": {}},
+                prepared_split_data=prepared,
+                baseline_cfg={"initial_cash": 1000},
+                baseline_path="app/config_best_2011_2026.json",
+                baseline_hash="abc",
+                survivorship_biased=True,
+                as_of="2020-01-10",
+            )
+
+        self.assertTrue(prepared["AAA"]["Close"].equals(prepared_before))
 
 
 if __name__ == "__main__":

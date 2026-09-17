@@ -249,7 +249,11 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
     symbols = cfg['symbols']
     regime_symbol = cfg['regime_symbol']
 
-    data = {s: normalize_ohlcv(df) for s, df in data.items()}
+    precomputed = bool(cfg.get('features_precomputed', False))
+    if precomputed:
+        data = {s: df.copy() for s, df in data.items()}
+    else:
+        data = {s: normalize_ohlcv(df) for s, df in data.items()}
 
     needed = set(symbols + [regime_symbol] + list(cfg.get('inverse_map', {}).values()))
     missing = sorted([s for s in needed if s not in data])
@@ -265,57 +269,58 @@ def run_backtest(data: dict, cfg: dict, progress_cb=None):
         if s in data:
             data[s] = data[s].reindex(idx)
 
-    # indicators
-    needed_list = sorted(list(needed))
-    total_syms = len(needed_list)
-    for j, s in enumerate(needed_list):
+    if not precomputed:
+        # indicators
+        needed_list = sorted(list(needed))
+        total_syms = len(needed_list)
+        for j, s in enumerate(needed_list):
+            if progress_cb is not None:
+                progress_cb(j, total_syms, f'Indicators: {j}/{total_syms} ({s})')
+
+            df = data[s]
+            if not df.index.equals(idx):
+                df = df.reindex(idx)
+                data[s] = df
+
+            df['ATR'] = atr(df, cfg['atr_period'])
+            df['ATR10'] = atr(df, 10)
+            df['ATR50'] = atr(df, 50)
+            df['ATR10_50_Ratio'] = df['ATR10'] / (df['ATR50'] + 1e-12)
+            df['ATR10_50_RatioPrev'] = df['ATR10_50_Ratio'].shift(1)
+            df['ATR10_50_RatioPrev2'] = df['ATR10_50_Ratio'].shift(2)
+            df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
+            df['SMA20'] = sma(df['Close'], 20)
+            df['SMA50'] = sma(df['Close'], 50)
+            df['SMA200'] = sma(df['Close'], 200)
+            df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
+            df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
+            df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
+            df['RangeLow10'] = df['Low'].shift(1).rolling(10).min()
+            df['RangeLow20'] = df['Low'].shift(1).rolling(20).min()
+            df['RangeHigh10'] = df['High'].shift(1).rolling(10).max()
+            df['DollarVol'] = dollar_volume(df)
+
+            mom_n = int(cfg.get('mom_lookback', 126))
+            df['Mom'] = pct_return(df['Close'], mom_n)
+
+            df['VolSMA50'] = sma(df['Volume'], 50)
+            df['VolSMA20'] = sma(df['Volume'], 20)
+            df['RelVol'] = df['Volume'] / (df['VolSMA50'] + 1e-12)
+            df['VolContracting20_50'] = df['VolSMA20'] < df['VolSMA50']
+
+            reg_close = data[regime_symbol]['Close']
+            df['RS63'] = pct_return(df['Close'], 63) - pct_return(reg_close, 63)
+            df['RS126'] = pct_return(df['Close'], 126) - pct_return(reg_close, 126)
+
+            rsi_p = int(cfg.get('rsi_period', 0))
+            if rsi_p > 0:
+                df['RSI'] = rsi(df['Close'], rsi_p)
+
+            if bool(cfg.get('enable_cwh', True)):
+                data[s] = detect_cup_handle(df, cfg)
+
         if progress_cb is not None:
-            progress_cb(j, total_syms, f'Indicators: {j}/{total_syms} ({s})')
-
-        df = data[s]
-        if not df.index.equals(idx):
-            df = df.reindex(idx)
-            data[s] = df
-
-        df['ATR'] = atr(df, cfg['atr_period'])
-        df['ATR10'] = atr(df, 10)
-        df['ATR50'] = atr(df, 50)
-        df['ATR10_50_Ratio'] = df['ATR10'] / (df['ATR50'] + 1e-12)
-        df['ATR10_50_RatioPrev'] = df['ATR10_50_Ratio'].shift(1)
-        df['ATR10_50_RatioPrev2'] = df['ATR10_50_Ratio'].shift(2)
-        df['SMA_regime'] = sma(df['Close'], cfg['sma_regime'])
-        df['SMA20'] = sma(df['Close'], 20)
-        df['SMA50'] = sma(df['Close'], 50)
-        df['SMA200'] = sma(df['Close'], 200)
-        df['PivotClose'] = df['Close'].shift(1).rolling(cfg['breakout_lookback']).max()
-        df['HH'] = df['High'].shift(1).rolling(cfg['breakout_lookback']).max()
-        df['LL'] = df['Low'].shift(1).rolling(cfg['breakout_lookback']).min()
-        df['RangeLow10'] = df['Low'].shift(1).rolling(10).min()
-        df['RangeLow20'] = df['Low'].shift(1).rolling(20).min()
-        df['RangeHigh10'] = df['High'].shift(1).rolling(10).max()
-        df['DollarVol'] = dollar_volume(df)
-
-        mom_n = int(cfg.get('mom_lookback', 126))
-        df['Mom'] = pct_return(df['Close'], mom_n)
-
-        df['VolSMA50'] = sma(df['Volume'], 50)
-        df['VolSMA20'] = sma(df['Volume'], 20)
-        df['RelVol'] = df['Volume'] / (df['VolSMA50'] + 1e-12)
-        df['VolContracting20_50'] = df['VolSMA20'] < df['VolSMA50']
-
-        reg_close = data[regime_symbol]['Close']
-        df['RS63'] = pct_return(df['Close'], 63) - pct_return(reg_close, 63)
-        df['RS126'] = pct_return(df['Close'], 126) - pct_return(reg_close, 126)
-
-        rsi_p = int(cfg.get('rsi_period', 0))
-        if rsi_p > 0:
-            df['RSI'] = rsi(df['Close'], rsi_p)
-
-        if bool(cfg.get('enable_cwh', True)):
-            data[s] = detect_cup_handle(df, cfg)
-
-    if progress_cb is not None:
-        progress_cb(total_syms, total_syms, f'Indicators: {total_syms}/{total_syms} (done)')
+            progress_cb(total_syms, total_syms, f'Indicators: {total_syms}/{total_syms} (done)')
 
     reg = data[regime_symbol]
     reg['RiskOn'] = reg['Close'] > reg['SMA_regime']
